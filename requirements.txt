@@ -1,0 +1,6 @@
+# 运行（Windows 10/11，Python 3.10+）
+PySide6-Essentials>=6.6
+numpy>=1.26
+pillow>=10.0
+# 打包成单文件 exe
+pyinstaller>=6.0
