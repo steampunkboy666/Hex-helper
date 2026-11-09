@@ -1,0 +1,56 @@
+name: 问题反馈
+description: 推荐没弹出、位置不对、闪屏、报错等问题
+title: "[问题] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！附上**诊断文件**最能帮上忙：打开 Hex Helper 控制台 → 点「导出诊断」，把生成的文件（或整个 data 文件夹压缩后）拖到下面的附件框里。
+        诊断文件里只有分辨率、显示器、程序日志和识别截图，不含账号密码。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 哪部分出问题
+      multiple: true
+      options:
+        - 选英雄推荐
+        - 商店出装推荐
+        - 海克斯强化三选一识别/推荐
+        - 面板位置或大小
+        - 闪屏 / 掉帧 / 游戏崩溃
+        - 程序报错或打不开
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 你做了什么、期望看到什么、实际看到了什么。有截图最好。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hex Helper 版本
+      placeholder: 例如 v1.1
+    validations:
+      required: true
+  - type: input
+    id: screen
+    attributes:
+      label: 游戏分辨率 / 显示模式 / Windows 显示缩放
+      placeholder: 例如 2560x1440 无边框，缩放 125%
+    validations:
+      required: true
+  - type: input
+    id: monitors
+    attributes:
+      label: 显示器数量，以及是否开了 G-Sync/FreeSync（动态刷新率）
+      placeholder: 例如 2 个显示器，游戏在主屏，开了 G-Sync
+  - type: textarea
+    id: diag
+    attributes:
+      label: 诊断文件 / 日志
+      description: 把导出的诊断文件拖到这里，或粘贴日志内容。

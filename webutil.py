@@ -8,7 +8,9 @@ import urllib.error
 import urllib.request
 
 # 如实标明是哪个程序、去哪里找到作者（已实测 aramgg/op.gg/腾讯/图标站都不拦这种标识）
-UA = "HexHelper/1.1 (+https://github.com/steampunkboy666/Hex-helper)"
+VERSION = "1.1"
+REPO = "steampunkboy666/Hex-helper"
+UA = "HexHelper/%s (+https://github.com/%s)" % (VERSION, REPO)
 MIN_GAP = {"aramgg.com": 0.4, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取
 _last, _lock = {}, threading.Lock()
 
@@ -150,12 +152,6 @@ def parse_module(text):
     return _JS(text, m.end()).value()
 
 
-def parse_module(text):
-    """解析形如 `var e=<字面量>;export{e as default};` 的数据模块。"""
-    m = re.search(r"var\s+\w+\s*=\s*", text)
-    return _JS(text, m.end()).value()
-
-
 def decode_rsc(html):
     """还原 Next.js 页面里 self.__next_f.push([1,"..."]) 流式载荷拼成的文本。"""
     bs = chr(92)
@@ -184,3 +180,19 @@ def decode_rsc(html):
             pass
         i = k
     return "".join(out)
+
+
+# ---------------------------------------------------------------- 新版本检查
+def _ver(tag):
+    """'v1.2.3' -> (1, 2, 3)；解析不了返回 ()。"""
+    return tuple(int(x) for x in re.findall(r"\d+", tag or "")[:4])
+
+
+def latest_release(timeout=8):
+    """查 GitHub 上最新发布的版本。比当前版本新才返回 (版本号, 下载页地址)，否则 None。"""
+    data = json.loads(http_get("https://api.github.com/repos/%s/releases/latest" % REPO, timeout=timeout,
+                               retries=0, headers={"Accept": "application/vnd.github+json"}))
+    tag = data.get("tag_name", "")
+    if _ver(tag) > _ver(VERSION):
+        return tag, data.get("html_url") or "https://github.com/%s/releases" % REPO
+    return None

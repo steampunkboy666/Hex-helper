@@ -9,11 +9,12 @@ import time
 import urllib.request
 
 import config
+import webutil
 import winfx
 from lcu import LCU
 
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
-APP_VERSION = "1.0"
+APP_VERSION = webutil.VERSION
 
 
 def _item(name, level, detail, fix=""):

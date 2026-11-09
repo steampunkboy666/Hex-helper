@@ -941,6 +941,10 @@ class ControlWindow(QWidget):
                     " · 许可 CC BY-NC-ND 4.0：可免费使用和原样分享，禁止商用，未经授权不得发布修改版" % GOLD, 11, DIM, wrap=True)
         about.setOpenExternalLinks(True)
         lay.addWidget(about)
+        self.update_lab = lab("", 12, GOLD, wrap=True)   # 发现新版本时才显示
+        self.update_lab.setOpenExternalLinks(True)
+        self.update_lab.hide()
+        lay.addWidget(self.update_lab)
         self.rows = {}
         for key, name in (("data", "数据"), ("client", "客户端"), ("game", "游戏"), ("shop", "商店面板"), ("ocr", "海克斯识别")):
             r = QHBoxLayout()
@@ -1012,6 +1016,12 @@ class ControlWindow(QWidget):
         return bad, warn
 
     def set_status(self, key, text, ok=None):
+        if key == "update":   # text 形如 "v1.2|https://github.com/.../releases/tag/v1.2"
+            tag, _, url = text.partition("|")
+            self.update_lab.setText("发现新版本 %s，<a style='color:%s' href='%s'>点这里到 GitHub 下载</a>" % (
+                esc(tag), GOLD, esc(url)))
+            self.update_lab.show()
+            return
         col = {True: GREEN, False: RED, None: TXT}[ok]
         self.rows[key].setText("<span style='color:%s'>●</span> %s" % (col, esc(text)) if ok is not None else esc(text))
 

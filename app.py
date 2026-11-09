@@ -21,6 +21,7 @@ import layout
 import selfcheck
 import ui
 import vision
+import webutil
 import winfx
 from data_source import Data
 from lcu import LCU, DemoLCU, LCUError
@@ -192,7 +193,20 @@ class Helper(QObject):
         for target in (self.client_loop, self.live_loop, self.vision_loop):
             threading.Thread(target=self._guard(target, restart=True), daemon=True).start()
         threading.Thread(target=self._guard(self.ocr_start), daemon=True).start()
+        if self.settings["check_update"]:
+            self.pool.submit(self._guard(self.check_update))
         self.refresh_shop_status()
+
+    def check_update(self):
+        """启动时查一次 GitHub 有没有新版本（只读一个公开接口，查不到也不影响使用，不会自动下载）。"""
+        try:
+            new = webutil.latest_release()
+        except Exception as e:  # noqa: BLE001
+            logger.info("检查新版本失败：%s", e)
+            return
+        if new:
+            self.log("发现新版本 %s（当前 v%s），下载地址：%s" % (new[0], webutil.VERSION, new[1]))
+            self.bus.status.emit("update", "%s|%s" % new, None)
 
     def _guard(self, fn, restart=False):
         """常驻线程出异常时记日志并在 2 秒后重启（以前一次异常就让整局的识别彻底停掉）。"""
