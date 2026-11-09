@@ -5,6 +5,8 @@
   · 关键词联动：与已选强化/英雄出装路线同流派加分，物理/法术方向冲突扣分（推断，分值较小）。
 第一次选择时没有已选强化，主要看单项分，只给“能凑成高胜率组合”一点潜力分。
 """
+import re
+
 from data_source import RARITY_KEYS
 
 RARITY_NAMES = ("白银", "黄金", "棱彩")
@@ -35,8 +37,12 @@ ARCH_TAGS = {
 }
 
 
+_SCALING = re.compile(r"[（(]随[^）)]*[）)]")
+
+
 def aug_tags(aug):
-    text = (aug.get("name") or "") + (aug.get("desc") or "")
+    # “（随法术强度变化）”之类只是说明数值随什么成长，不代表这张强化提供该属性，不参与判断
+    text = (aug.get("name") or "") + _SCALING.sub("", aug.get("desc") or "")
     return {t for t, ws in TAG_WORDS.items() if any(w in text for w in ws)}
 
 
@@ -79,7 +85,8 @@ def rate_augment(data, hid, aid):
     return r
 
 
-AD_TAGS, AP_TAGS = {"攻击力", "暴击"}, {"法强", "法伤"}
+# 判断物理/法术方向冲突只看“加什么属性”：“额外魔法伤害”多为攻击特效，物理英雄照样能用，不算法术方向
+AD_TAGS, AP_TAGS = {"攻击力", "暴击"}, {"法强"}
 COMBO_CAP, TAG_CAP = 0.06, 0.025
 
 
@@ -138,6 +145,90 @@ def fit(cand, chosen, arch):
     return level, "，".join(reasons) or "无明显联动"
 
 
+# 强化标签 → 套路名（按优先级：前面的更能代表这张强化的打法）
+STYLE_NAMES = (
+    ("暴击", "暴击普攻流"), ("命中", "攻速特效流"), ("攻速", "攻速特效流"), ("法强", "法术爆发流"),
+    ("急速", "技能轰炸流"), ("大招", "大招流"), ("持续伤害", "持续伤害流"),
+    ("吸血", "吸血续航流"), ("护盾治疗", "护盾治疗流"), ("肉盾", "前排坦克流"), ("控制", "控制开团"),
+    ("攻击力", "物理输出"), ("位移", "机动拉扯"), ("金币", "经济发育"), ("法伤", "附加魔法伤害"),
+)
+# 这些标签决定“出什么装”；急速、护盾治疗之类谁都能用，没有对应出装路线也不算问题
+BUILD_DRIVING = {"暴击", "攻速", "命中", "法强", "肉盾", "攻击力"}
+# 强化标签的口语说法（“都加 xx”）
+TAG_SAY = {"暴击": "暴击", "攻速": "攻速", "吸血": "吸血", "法强": "法强", "法伤": "法术伤害", "急速": "技能冷却",
+           "肉盾": "坦度", "护盾治疗": "护盾/治疗", "攻击力": "攻击力", "命中": "普攻特效", "位移": "机动性",
+           "控制": "控制", "持续伤害": "持续伤害", "金币": "金币", "大招": "大招"}
+BUILD_NAMES = {"AD": "物理", "AP": "法术", "Tank": "坦克", "Crit": "暴击", "On-Hit": "攻击特效", "Lethality": "穿甲",
+               "Bruiser": "战士", "Mage": "法师", "Support": "辅助", "Assassin": "刺客"}
+
+
+MOVE_WORDS = ("冲刺", "闪烁", "位移", "传送")
+
+
+def style_of(tags, aug=None):
+    """强化标签 → 套路名列表（最多两个，去重）。“移动速度”几乎每张强化都顺带有，只有冲刺/闪烁类才算机动套路。"""
+    if aug is not None and "位移" in tags and not any(w in (aug.get("desc") or "") for w in MOVE_WORDS):
+        tags = tags - {"位移"}
+    out = []
+    for t, name in STYLE_NAMES:
+        if t in tags and name not in out:
+            out.append(name)
+    return out[:2]
+
+
+def build_for(data, hid, cand):
+    """该英雄的各套出装里，和这张强化最搭的一套（按出装流派标签与强化标签重合度，其次胜率）。
+    返回 {"label", "winRate", "items":[名称], "main": 是否就是最常用的那套} 或 None。"""
+    det = data.ensure_detail(hid, offline=True) if hid else None
+    groups = [g for g in (det or {}).get("itemBuilds", []) if g.get("tags") and g.get("coreBuilds")]
+    if not groups or not cand["tags"]:
+        return None
+    main = max(groups, key=lambda g: g.get("playCount") or g.get("pickRate") or 0)
+
+    def match(g):
+        return sum(1 for t in g["tags"] if ARCH_TAGS.get(t, set()) & cand["tags"])
+    best = max(groups, key=lambda g: (match(g), g.get("winRate") or 0))
+    if match(best) == 0:
+        return None
+    items = []
+    for cb in best["coreBuilds"]:          # 第一套去掉鞋子后不够三件，就从这条路线的其他出装里补
+        for it in cb.get("items", []):
+            iid = str(it.get("itemId"))
+            name = (data.item(iid) or {}).get("name") or it.get("name") or iid
+            if not data.is_boots(iid) and name not in items:
+                items.append(name)
+        if len(items) >= 3:
+            break
+    if not items:
+        return None
+    return {"label": "/".join(BUILD_NAMES.get(t, t) for t in best["tags"]), "winRate": best.get("winRate"),
+            "items": items[:3], "main": best is main}
+
+
+def play_note(data, hid, cand, chosen, arch):
+    """用人话说明这张强化：适合什么套路、和已选的哪张联动、和英雄出装是否冲突、选了之后出什么装。
+    联动/套路是根据强化描述里的关键词推断的；出装是该英雄真实的出装统计。"""
+    styles = style_of(cand["tags"], cand)
+    links = []
+    for c in chosen:
+        common = cand["tags"] & c["tags"]
+        if common:
+            links.append("配合已选「%s」（都加%s）" % (c["name"], "、".join(TAG_SAY[t] for t in sorted(common))))
+    warn = None
+    side = set(arch)
+    for c in chosen:
+        side |= c["tags"]
+    if cand["tags"] & AP_TAGS and not cand["tags"] & AD_TAGS and side & AD_TAGS and not side & AP_TAGS:
+        warn = "偏法术，和这个英雄的物理出装方向相反"
+    elif cand["tags"] & AD_TAGS and not cand["tags"] & AP_TAGS and side & AP_TAGS and not side & AD_TAGS:
+        warn = "偏物理，和这个英雄的法术出装方向相反"
+    elif cand["tags"] & arch and not links:
+        links.append("契合这个英雄的常用出装（%s）" % "、".join(TAG_SAY[t] for t in sorted(cand["tags"] & arch)))
+    build = build_for(data, hid, cand)
+    return {"styles": styles, "links": links[:2], "warn": warn, "build": build,
+            "nobuild": build is None and bool(cand["tags"] & BUILD_DRIVING) and not warn}
+
+
 def followups(data, hid, cand, chosen, arch, n=3):
     """选了 cand 之后，后续稀有度里值得留意的强化（胜率 + 联动加成）。"""
     nxt = [r for r in range(cand["rarity"] + 1, 3)] or [2]
@@ -179,6 +270,7 @@ def evaluate_offer(data, hid, offered_ids, chosen_ids):
         if not x:
             continue
         x["fit"], x["fit_reason"] = fit(x, chosen, arch)
+        x["note"] = play_note(data, hid, x, chosen, arch)
         x["follow"] = followups(data, hid, x, chosen, arch)
         x["combo"], x["combo_info"] = combo_bonus(data, hid, x, chosen)
         x["tag_bonus"] = tag_bonus(x, chosen, arch) if chosen else 0.0

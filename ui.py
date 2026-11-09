@@ -830,7 +830,9 @@ class SidePanel(QWidget):
                 RARITY_COL[c["rarity"]], esc(c["name"]),
                 pct(c["wr"], 0) if c["wr"] is not None else tier_text(c["tier"]))
                 for c in ev["chosen"]), S(11), TXT, wrap=True, width=S(346)))
-        lay.addWidget(lab("综合 = 单项胜率 + 组合加分（该英雄高胜率三件组合，真实统计）+ 联动（关键词推断）· 选错了可按撤销键",
+        lay.addWidget(lab("综合 = 单项胜率 + 组合加分（该英雄高胜率三件组合，真实统计）+ 联动（关键词推断）"
+                          + ("· 套路说明按强化描述推断，出装为该英雄真实统计" if ctx.settings["aug_notes"] else "")
+                          + " · 选错了可按撤销键",
                           S(10), DIM, wrap=True))
         self._place(game_rect)
 
@@ -880,8 +882,29 @@ class SidePanel(QWidget):
                 GOLD, have, ("再拿 " + "+".join(esc(x) for x in need)) if need else "已凑齐", ci["winRate"] * 100,
                 ci["games"]), S(11), TXT, wrap=True, width=S(268)))
         fc = {"高": GREEN, "中": GOLD, "一般": DIM}[o["fit"]]
-        col.addWidget(lab("适配 <b style='color:%s'>%s</b> <span style='color:%s'>%s</span>" % (
-            fc, o["fit"], DIM, esc(o["fit_reason"])), S(11), TXT, wrap=True, width=S(268)))
+        note = o.get("note") if ctx.settings["aug_notes"] else None
+        if note:
+            style = "适合 <b style='color:%s'>%s</b>" % (GOLD, " / ".join(note["styles"])) if note["styles"] \
+                else "<span style='color:%s'>通用效果，不挑套路</span>" % DIM
+            col.addWidget(lab("适配 <b style='color:%s'>%s</b> &nbsp;%s" % (fc, o["fit"], style), S(11), TXT,
+                              wrap=True, width=S(268)))
+            for s in note["links"]:
+                col.addWidget(lab("<span style='color:%s'>↔</span> %s" % (GREEN, esc(s)), S(11), TXT,
+                                  wrap=True, width=S(268)))
+            if note["warn"]:
+                col.addWidget(lab("<span style='color:%s'>⚠ %s</span>" % (YELLOW, esc(note["warn"])), S(11), TXT,
+                                  wrap=True, width=S(268)))
+            b = note["build"]
+            if b:
+                col.addWidget(lab("<span style='color:%s'>出装</span> %s%s：%s" % (
+                    DIM, "走%s路线" % b["label"],
+                    "（胜率 %.0f%%）" % (b["winRate"] * 100) if b.get("winRate") else "",
+                    " → ".join(esc(n) for n in b["items"])), S(11), TXT, wrap=True, width=S(268)))
+            elif note.get("nobuild"):
+                col.addWidget(lab("出装 这个英雄很少走对应路线，选了仍按常用出装", S(11), DIM, wrap=True, width=S(268)))
+        else:
+            col.addWidget(lab("适配 <b style='color:%s'>%s</b> <span style='color:%s'>%s</span>" % (
+                fc, o["fit"], DIM, esc(o["fit_reason"])), S(11), TXT, wrap=True, width=S(268)))
         if o["follow"]:
             col.addWidget(lab("后续可搭配：" + " · ".join("<span style='color:%s'>%s%s</span>" % (
                 RARITY_COL[f["rarity"]], esc(f["name"]), "(组合)" if f.get("combo_mate") else "")
