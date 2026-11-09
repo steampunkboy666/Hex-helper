@@ -1,0 +1,7 @@
+# 仓库里统一用 LF 换行，Windows 上检出时 Git 会按需转换
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
+*.npy binary
