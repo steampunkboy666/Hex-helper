@@ -2,6 +2,7 @@
 import hashlib
 import os
 import threading
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,6 +19,7 @@ import winfx
 
 FONT = "Microsoft YaHei UI"
 GOLD, TXT, DIM, GREEN, RED = "#e6c068", "#eef3f6", "#8da3b0", "#5ee0a0", "#ff6b6b"
+YELLOW = "#f0b44c"
 BG = QColor(8, 16, 24)
 RARITY_COL = {0: "#c9d1d8", 1: "#f0c24b", 2: "#ff7ad9"}
 TIER_COL = {"0": "#f0c24b", "1": "#f0c24b", "2": "#5ee0a0", "3": "#6cc0ff", "4": "#9aa7b2", "5": "#7a7f87"}
@@ -303,6 +305,37 @@ def aug_line(ctx, rows):
 
 
 # ---------------------------------------------------------------- 选人阶段的英雄卡片
+def age_text(ts, now=None):
+    """时间戳 → “刚刚 / 25 分钟前 / 3 小时前 / 2 天前（11-07 21:30）”。"""
+    if not ts:
+        return "未知时间"
+    secs = max(0, (now or time.time()) - ts)
+    if secs < 120:
+        rel = "刚刚"
+    elif secs < 3600:
+        rel = "%d 分钟前" % (secs // 60)
+    elif secs < 86400:
+        rel = "%d 小时前" % (secs // 3600)
+    else:
+        rel = "%d 天前" % (secs // 86400)
+    return "%s（%s）" % (rel, time.strftime("%m-%d %H:%M", time.localtime(ts)))
+
+
+def freshness(ctx, hid, short=False):
+    """卡片上的“数据更新于 …”：绿色 = 12 小时内联网拿到的；黄色 = 更早的缓存；正在联网时标“更新中…”。"""
+    d = ctx.data
+    det = d.detail_cached(hid)
+    ts = det["fetched_at"] if det else d.meta.get("fetched_at")
+    busy = hid in d.refreshing or "meta" in d.refreshing
+    stale = (det["stale"] if det else True) or d.meta_stale()
+    col = YELLOW if stale else GREEN
+    text = age_text(ts)
+    if short:
+        text = text.split("（")[0]
+    tail = " · <span style='color:%s'>更新中…</span>" % GOLD if busy else (" · 旧数据" if stale else "")
+    return lab("<span style='color:%s'>● 数据更新于 %s</span>%s" % (col, text, tail), ctx.S(10 if short else 11), DIM)
+
+
 class HeroCard(QFrame):
     def __init__(self, ctx, hid, tag, best, compact):
         super().__init__()
@@ -329,6 +362,7 @@ class HeroCard(QFrame):
         if not det:
             lay.addWidget(lab("正在获取出装与强化数据…", S(11), DIM))
             return
+        lay.addWidget(freshness(ctx, hid))
         top = d.top_items(hid, 3)
         if top:
             lay.addWidget(section_title(ctx, "胜率最高的 3 件装备（不含鞋子）"))
@@ -385,6 +419,7 @@ class HeroRow(QFrame):
         if not det:
             col.addWidget(lab("正在获取数据…", S(10), DIM))
         else:
+            col.addWidget(freshness(ctx, hid, short=True))
             row = QHBoxLayout()
             row.setSpacing(S(2))
             for it in d.top_items(hid, 3):

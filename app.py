@@ -169,23 +169,41 @@ class Helper(QObject):
 
     # ------------------------------------------------------------ 数据
     def load_data(self, force=False):
-        self.bus.status.emit("data", "正在加载数据…", None)
+        # 用过一次以后：先用上次缓存的数据立刻启动和显示，再在后台联网，有新数据再刷新界面
+        if not force and not self.data.meta and self.data.load_cached():
+            age, stale = self.data.meta_age(), self.data.meta_stale()
+            self.log("先用本地缓存的数据（%s更新）" % ui.age_text(self.data.meta["fetched_at"]))
+            if stale:
+                self.data.refreshing.add("meta")   # 先标上，第一次显示就能看到“正在后台更新”
+            self.bus.data_ready.emit()
+            if not stale:
+                return
+            self.log("缓存已超过 %d 小时，正在后台联网更新…" % (age // 3600))
+        else:
+            self.bus.status.emit("data", "正在加载数据…", None)
 
         def work():
             try:
                 self.data.load(force=force, log=self.log)
+                self.data.refreshing.discard("meta")
                 self.bus.data_ready.emit()
             except Exception as e:  # noqa: BLE001
                 self.log("数据加载失败：%s" % e)
+                self.data.refreshing.discard("meta")
+                if self.data.meta:   # 已经在用缓存：继续用，只提示更新失败
+                    self.bus.data_ready.emit()
+                    return
                 self.bus.status.emit("data", "加载失败：%s" % e, False)
                 self.run_selfcheck()
         threading.Thread(target=work, daemon=True).start()
 
     def start_workers(self):
         m = self.data.meta
-        self.bus.status.emit("data", "%s 版 · 更新于 %s · %d 个英雄 · 来源 %s%s" % (
+        self.bus.status.emit("data", "%s 版 · 更新于 %s · %d 个英雄 · 来源 %s%s · 本机获取于 %s%s" % (
             m["version"], m["updated"], m["total"], self.data.source_label(),
-            "" if m.get("source") == "aramgg" else "（备用源，部分数据缺失）"), True if m.get("source") == "aramgg" else None)
+            "" if m.get("source") == "aramgg" else "（备用源，部分数据缺失）", ui.age_text(m["fetched_at"]),
+            "（正在后台更新…）" if "meta" in self.data.refreshing else ""),
+            True if m.get("source") == "aramgg" else None)
         if getattr(self, "_started", False):
             self.cs.render() if self.cs.isVisible() else None
             return
@@ -275,17 +293,28 @@ class Helper(QObject):
             self.stop.wait(1 if phase in ("ChampSelect", "Lobby", "Matchmaking", "ReadyCheck") or self.live is None else 5)
 
     def fetch_detail_async(self, cid):
+        """先用本地缓存立刻显示（不管多旧），缓存超过 12 小时或没有缓存时再在后台联网，拿到后刷新卡片。"""
         cid = str(cid)
-        if self.data.detail_cached(cid) or cid in self._fetching:
+        if not self.data.detail_stale(cid) or cid in self._fetching:
             return
         self._fetching.add(cid)
+        d = self.data
 
         def work():
             try:
-                self.data.ensure_detail(cid)
+                if d.detail_cached(cid) is None and d.ensure_detail(cid, offline=True):
+                    self.bus.detail.emit(cid)          # 上次的数据先显示出来
+                if d.detail_stale(cid):
+                    d.refreshing.add(cid)
+                    self.bus.detail.emit(cid)          # 卡片上显示“更新中…”
+                    old = (d.detail_cached(cid) or {}).get("fetched_at")
+                    det = d.ensure_detail(cid)
+                    if det and old and det["fetched_at"] == old:
+                        self.log("英雄 %s 联网更新没有拿到新数据，继续显示 %s的数据" % (cid, ui.age_text(old)))
             except Exception as e:  # noqa: BLE001
                 self.log("英雄 %s 详情获取失败：%s" % (cid, e))
             finally:
+                d.refreshing.discard(cid)
                 self._fetching.discard(cid)
                 self.bus.detail.emit(cid)
         self.pool.submit(self._guard(work))
@@ -599,8 +628,8 @@ class Helper(QObject):
         if hid != self.hero_id:
             self.hero_id = hid
             self._sig = None
-            if hid and not self.data.detail_cached(hid):
-                self.pool.submit(self._guard(lambda: (self.data.ensure_detail(hid), self.bus.live.emit(self.live))))
+            if hid:
+                self.fetch_detail_async(hid)   # 同样先用缓存，旧了再后台更新；到了会刷新面板
         h = self.data.hero(hid) if hid else None
         self.bus.status.emit("game", "对局中 · %s · %d:%02d" % (h["title"] if h else "英雄未识别", snap["time"] // 60,
                                                               snap["time"] % 60), True)

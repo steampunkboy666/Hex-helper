@@ -42,7 +42,7 @@ def aug_tags(aug):
 
 def hero_arch(data, hid):
     """英雄的主流出装流派 → 强化标签集合。"""
-    det = data.ensure_detail(hid) if hid else None
+    det = data.ensure_detail(hid, offline=True) if hid else None  # 只读已有数据，界面线程里绝不联网
     groups = sorted((det or {}).get("itemBuilds", []), key=lambda g: -(g.get("playCount") or g.get("pickRate") or 0))
     tags = set()
     for t in (groups[0].get("tags", []) if groups else []):
@@ -51,7 +51,7 @@ def hero_arch(data, hid):
 
 
 def _hero_list(data, hid, rk):
-    det = data.ensure_detail(hid) if hid else None
+    det = data.ensure_detail(hid, offline=True) if hid else None  # 只读已有数据，界面线程里绝不联网
     lst = ((det or {}).get("allAugmentsByRarity") or {}).get(rk) or []
     return sorted(lst, key=lambda x: -x["q"])
 

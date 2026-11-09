@@ -55,6 +55,7 @@ class Data:
         self._lock = threading.Lock()
         self._douhun_files = None
         self._lock_dh = threading.Lock()
+        self.refreshing = set()   # 正在联网更新的英雄 id（界面据此显示“更新中…”）；"meta" 表示榜单
 
     # ------------------------------------------------------------ 基础数据
     def _is_down(self, name):
@@ -67,6 +68,21 @@ class Data:
 
     def source_label(self):
         return SOURCE_NAMES.get(self.meta.get("source"), "?")
+
+    def load_cached(self):
+        """只读本地缓存（不联网、不管多旧）：第二次起启动时先用它立刻显示，联网更新放到后台。"""
+        cached = _read(self.meta_path)
+        if cached and cached.get("schema") == SCHEMA and cached.get("summary"):
+            self.meta = cached
+            return True
+        return False
+
+    def meta_age(self):
+        """榜单数据距上次联网获取过了多少秒（没有数据时为无穷大）。"""
+        return time.time() - self.meta["fetched_at"] if self.meta.get("fetched_at") else float("inf")
+
+    def meta_stale(self):
+        return self.meta_age() >= CACHE_TTL
 
     def load(self, force=False, log=print):
         cached = _read(self.meta_path)
@@ -226,9 +242,11 @@ class Data:
                     _write(path, {"t": time.time(), "files": self._douhun_files})
             return self._douhun_files
 
-    def _augment_entries(self, hid):
+    def _augment_entries(self, hid, offline=False):
         ttl = lambda src: DETAIL_TTL if src == "aramgg" else 3600  # noqa: E731
         path, cached, fresh = self._cached_file("aug", hid, ttl)
+        if offline:
+            return cached
         if fresh and not (cached["source"] != "aramgg" and not self._is_down("aramgg") and
                           time.time() - cached["fetched_at"] > 900):
             return cached
@@ -267,9 +285,9 @@ class Data:
                 self._mark_down(src)
         return cached  # 全部失败：用旧缓存（可能为 None）
 
-    def _builds(self, hid):
+    def _builds(self, hid, offline=False):
         path, cached, fresh = self._cached_file("build", hid, lambda s: DETAIL_TTL)
-        if fresh:
+        if fresh or offline:
             return cached
         if not self._is_down("aramgg"):
             try:
@@ -294,11 +312,11 @@ class Data:
             pass
         return None
 
-    def _item_stats(self, hid):
+    def _item_stats(self, hid, offline=False):
         """单件装备胜率（op.gg）。只是锦上添花：拿不到就用旧缓存，再拿不到就没有。"""
         path, cached, fresh = self._cached_file("items", hid, lambda s: DETAIL_TTL)
         fresh = fresh and "cores" in cached  # 旧版缓存没有三件套，重新获取
-        if fresh or self._is_down("opgg"):
+        if fresh or offline or self._is_down("opgg"):
             return cached
         try:
             out = {"source": "opgg", "fetched_at": time.time(), **S.opgg_items(self._opgg_key(hid))}
@@ -339,15 +357,16 @@ class Data:
     def trios(self, cid):
         return (self.detail_cached(cid) or {}).get("trios") or []
 
-    def ensure_detail(self, cid):
-        """获取该英雄的强化统计和出装；任何一部分失败都会尽量降级，全部没有则返回 None。"""
+    def ensure_detail(self, cid, offline=False):
+        """获取该英雄的强化统计和出装；任何一部分失败都会尽量降级，全部没有则返回 None。
+        offline=True：只用本地缓存（不管多旧，不联网），用于先把上次的数据立刻显示出来。"""
         hid = str(cid)
         with self._lock:
             hit = self._detail.get(hid)
-            if hit and time.time() - hit["_ts"] < DETAIL_TTL:
+            if hit and (offline or not hit["stale"]):
                 return hit
-        aug, build = self._augment_entries(hid), self._builds(hid)
-        items = self._item_stats(hid)
+        aug, build = self._augment_entries(hid, offline), self._builds(hid, offline)
+        items = self._item_stats(hid, offline)
         if not aug and not build:
             return None
         by_rarity = {k: [] for k in RARITY_KEYS}
@@ -373,12 +392,20 @@ class Data:
              "itemStats": items, "trios": (aug or {}).get("trios") or [],
              "aug_source": (aug or {}).get("source"), "build_source": (build or {}).get("source"),
              "date": time.strftime("%Y-%m-%d", time.localtime((aug or build)["fetched_at"])), "_ts": time.time()}
+        # 这张卡片的数据是什么时候联网拿到的：取各部分里最旧的那个；超过 12 小时算“旧数据”，需要后台更新
+        d["fetched_at"] = min(p["fetched_at"] for p in (aug, build) if p)
+        d["stale"] = time.time() - d["fetched_at"] >= DETAIL_TTL
         with self._lock:
             self._detail[hid] = d
         return d
 
     def detail_cached(self, cid):
         return self._detail.get(str(cid))
+
+    def detail_stale(self, cid):
+        """内存里没有这个英雄的数据，或者是超过 12 小时的旧数据。"""
+        det = self._detail.get(str(cid))
+        return det is None or det["stale"]
 
     def _boots_ids(self, cid):
         st = (self.detail_cached(cid) or {}).get("itemStats") or {}
