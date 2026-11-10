@@ -2,17 +2,27 @@
 import gzip
 import json
 import re
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.request
 
 # 如实标明是哪个程序、去哪里找到作者（已实测 aramgg/op.gg/腾讯/图标站都不拦这种标识）
-VERSION = "1.2"
+VERSION = "1.3"
 REPO = "steampunkboy666/Hex-helper"
 UA = "HexHelper/%s (+https://github.com/%s)" % (VERSION, REPO)
 MIN_GAP = {"aramgg.com": 0.4, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取
 _last, _lock = {}, threading.Lock()
+_ctx = None   # 系统证书库缺根证书（精简版/网吧系统常见）时改用随程序带的证书，仍然校验，不是跳过
+
+
+def _bundled_ctx():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _throttle(url):
@@ -29,13 +39,16 @@ def _throttle(url):
 
 def http_get(url, binary=False, timeout=25, retries=2, headers=None):
     """GET（跟随跳转、自动解压 gzip、按主机限速）。404 等 HTTP 错误不重试。"""
+    global _ctx
     last = None
-    for i in range(retries + 1):
+    for i in range(retries + 2):
+        if i > retries and not (last and "CERTIFICATE_VERIFY_FAILED" in str(last) and _ctx):
+            break
         try:
             _throttle(url)
             h = {"User-Agent": UA, "Accept-Encoding": "gzip", "Accept-Language": "zh-CN,zh;q=0.9"}
             h.update(headers or {})
-            with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout, context=_ctx) as r:
                 data = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
                     data = gzip.decompress(data)
@@ -46,7 +59,12 @@ def http_get(url, binary=False, timeout=25, retries=2, headers=None):
             last = e
         except Exception as e:  # noqa: BLE001
             last = e
-        time.sleep(1 + i)
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) and _ctx is None and url.startswith("https"):
+                _ctx = _bundled_ctx()
+                if _ctx:
+                    continue                 # 马上用自带证书再试一次
+        if i < retries:
+            time.sleep(1 + i)
     raise last
 
 

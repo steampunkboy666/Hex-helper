@@ -35,6 +35,12 @@ DEFAULTS = {
     "offer_panel_secs": 25,      # 三选一推荐面板显示多少秒后自动收起（0 = 一直显示）；刷新出新选项会重新显示
     "check_update": True,        # 启动时到 GitHub 查一次有没有新版本（只提示，不会自动下载）
     "aug_notes": True,           # 三选一每张强化写明适合的套路、和已选强化的联动、配套出装
+    "preset": "standard",        # 面板信息量：standard 标准 / lite 精简（只留最关键的几行）
+    "show_champ_select": True,   # 选人时显示英雄推荐卡片
+    "show_shop_panel": True,     # 打开商店时显示出装面板
+    "show_offer_panel": True,    # 海克斯三选一时显示推荐面板
+    "import_item_set": True,     # 选人时把推荐出装写入客户端的装备推荐页（只增删本程序自己的那一页；控制台可关闭）
+    "post_game_report": True,    # 对局结束后弹出战报卡并保存图片（data/reports；控制台可关闭）
     "panel_top": 0.06,           # 对局内面板的竖直范围（占画面高度）：上沿留出比分栏，
     "panel_bottom": 0.58,        # 下沿留出小地图/装备栏/技能栏（小地图最大约占下方 42%，左右放哪边都不会被压到）
     "shop_extent": {},           # 各分辨率下测得的商店面板左右边缘（自动记录，商店被拖动后会自动更新）

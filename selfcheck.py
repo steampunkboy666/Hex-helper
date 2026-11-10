@@ -32,6 +32,41 @@ def _ping(url, timeout=6):
         return False, str(getattr(e, "reason", e))[:60]
 
 
+class _DD(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_ulong), ("DeviceName", ctypes.c_wchar * 32), ("DeviceString", ctypes.c_wchar * 128),
+                ("StateFlags", ctypes.c_ulong), ("DeviceID", ctypes.c_wchar * 128), ("DeviceKey", ctypes.c_wchar * 128)]
+
+
+class _DM(ctypes.Structure):
+    _fields_ = [("dmDeviceName", ctypes.c_wchar * 32), ("dmSpecVersion", ctypes.c_ushort),
+                ("dmDriverVersion", ctypes.c_ushort), ("dmSize", ctypes.c_ushort), ("dmDriverExtra", ctypes.c_ushort),
+                ("dmFields", ctypes.c_ulong), ("_pos", ctypes.c_long * 2), ("_orient", ctypes.c_ulong * 2),
+                ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short),
+                ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short), ("dmFormName", ctypes.c_wchar * 32),
+                ("dmLogPixels", ctypes.c_ushort), ("dmBitsPerPel", ctypes.c_ulong), ("dmPelsWidth", ctypes.c_ulong),
+                ("dmPelsHeight", ctypes.c_ulong), ("dmDisplayFlags", ctypes.c_ulong),
+                ("dmDisplayFrequency", ctypes.c_ulong), ("_rest", ctypes.c_ulong * 8)]
+
+
+def _gpus():
+    """显卡名称 + 所接显示器的当前刷新率（只读系统信息）。"""
+    u, names, i = ctypes.windll.user32, [], 0
+    while i < 16:
+        d = _DD()
+        d.cb = ctypes.sizeof(d)
+        if not u.EnumDisplayDevicesW(None, i, ctypes.byref(d), 0):
+            break
+        i += 1
+        if d.StateFlags & 1:   # 接着桌面的输出
+            m = _DM()
+            m.dmSize = ctypes.sizeof(m)
+            hz = " %dHz" % m.dmDisplayFrequency if u.EnumDisplaySettingsW(d.DeviceName, -1, ctypes.byref(m)) else ""
+            s = d.DeviceString.strip() + hz
+            if s not in names:
+                names.append(s)
+    return names
+
+
 def check_all(helper):
     out = []
     # 系统版本
@@ -134,6 +169,12 @@ def check_all(helper):
         out.append(_item("数据目录", OK, config.DATA_DIR))
     except OSError as e:
         out.append(_item("数据目录", FAIL, "不可写：%s" % e, "把 exe 放到有写权限的文件夹（如桌面、D 盘）"))
+    # 硬件（只写进诊断，方便按配置/显卡排查问题）
+    try:
+        out.append(_item("处理器", INFO, "%d 线程 · %s" % (os.cpu_count() or 0, platform.processor()[:60])))
+        out.append(_item("显卡", INFO, " / ".join(_gpus()) or "未读到"))
+    except Exception:  # noqa: BLE001
+        pass
     # 显示器 / DPI
     try:
         n = ctypes.windll.user32.GetSystemMetrics(80)

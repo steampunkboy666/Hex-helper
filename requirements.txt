@@ -4,3 +4,4 @@ numpy>=1.26
 pillow>=10.0
 # 打包成单文件 exe
 pyinstaller>=6.0
+certifi>=2024.0

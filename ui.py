@@ -9,10 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
-from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
-                               QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
+                               QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import advisor
+import report
 import layout
 import webutil
 import winfx
@@ -783,6 +784,7 @@ class SidePanel(QWidget):
         else:
             sub = "数据 %s 版" % d.meta.get("version")
         self.header(lay, hid, "推荐出装 · %s" % (hero["title"] if hero else "未识别英雄"), "%s &nbsp;|&nbsp; 金币 %d" % (sub, gold))
+        lite = ctx.settings["preset"] == "lite"     # 精简：只留胜率最高的 3 件 + 一套三件套
         if not hid or not d.detail_cached(hid):
             lay.addWidget(lab("正在获取英雄数据…", S(12), DIM))
         else:
@@ -795,7 +797,7 @@ class SidePanel(QWidget):
                                                                        esc(i["name"]), i["winRate"] * 100, i["games"])
                     for i in top), icon=44, name_w=64))
                 lay.addWidget(section_title(ctx, "核心三件套（不含鞋子）"))
-            for b in advisor.shop_model(d, hid, owned, gold, 3):
+            for b in advisor.shop_model(d, hid, owned, gold, 1 if lite else 3):
                 items = [dict(i, gap=max(0, i["left"] - gold)) for i in b["items"]]
                 left = "全部已购" if b["left"] == 0 else "还需 %d 金币" % b["left"]
                 wr, tail = build_stats({"winRate": b["winRate"], "playCount": b["play"], "pickRate": b["pick"]})
@@ -803,9 +805,10 @@ class SidePanel(QWidget):
                     esc(b["label"]), GREEN if (b["winRate"] or 0) >= .5 else DIM, wr, tail, left), icon=44, name_w=64))
         det = d.detail_cached(hid) if hid else None
         old = det and det.get("build_source") not in (None, "aramgg")
-        lay.addWidget(lab("绿色√ 已拥有 · 金边 当前买得起 · %s" % (
-            "出装来自 douhunwiki.cn 的旧数据（主源对该英雄无出装）" if old else "装备与三件套胜率来自 op.gg（不含鞋子）"),
-            S(10), DIM, wrap=True))
+        if not lite:
+            lay.addWidget(lab("绿色√ 已拥有 · 金边 当前买得起 · %s" % (
+                "出装来自 douhunwiki.cn 的旧数据（主源对该英雄无出装）" if old else "装备与三件套胜率来自 op.gg（不含鞋子）"),
+                S(10), DIM, wrap=True))
         self._place(game_rect)
 
     # -- 海克斯
@@ -824,6 +827,9 @@ class SidePanel(QWidget):
                                                        for i, o in enumerate(rank)), S(12), TXT, wrap=True))
         for i, o in enumerate(ev["options"]):
             lay.addWidget(self._option(o, i + 1))
+        if ctx.settings["preset"] == "lite":         # 精简：不显示已选强化和说明文字
+            self._place(game_rect)
+            return
         if ev["chosen"]:
             lay.addWidget(section_title(ctx, "已选强化"))
             lay.addWidget(lab("&nbsp;&nbsp;".join("<span style='color:%s'>%s</span> %s" % (
@@ -866,6 +872,19 @@ class SidePanel(QWidget):
             stat = "梯队 <b style='color:%s'>%s</b> &nbsp; %s%s &nbsp;<span style='color:%s'>(op.gg 无胜率)</span>" % (
                 tcol, tier_text(o["tier"]), rank, " &nbsp; 综合分 %.0f" % o["perf"] if o["perf"] else "", DIM)
         col.addWidget(lab(stat, S(12), TXT))
+        lite = ctx.settings["preset"] == "lite"
+        if lite:   # 精简：名称、胜率、综合分、套路一行、冲突提示
+            note = o.get("note") if ctx.settings["aug_notes"] else None
+            line = "综合 <b>%.1f</b>" % (o["final"] * 100) if o.get("final") is not None else ""
+            if note and note["styles"]:
+                line += " &nbsp;<span style='color:%s'>%s</span>" % (GOLD, " / ".join(note["styles"]))
+            if line:
+                col.addWidget(lab(line, S(11), TXT, wrap=True, width=S(268)))
+            if note and note["warn"]:
+                col.addWidget(lab("<span style='color:%s'>⚠ %s</span>" % (YELLOW, esc(note["warn"])), S(11), TXT,
+                                  wrap=True, width=S(268)))
+            bl.addLayout(col, 1)
+            return box
         if o.get("final") is not None:
             parts = ["单项 %.1f" % (o["score"] * 100)]
             if o.get("combo"):
@@ -942,6 +961,118 @@ class SidePanel(QWidget):
         self._present()
 
 
+# ---------------------------------------------------------------- 赛后战报
+class Bar(QWidget):
+    """横条：按比例填充。"""
+
+    def __init__(self, frac, color, w, h):
+        super().__init__()
+        self.frac, self.color = max(0.0, min(1.0, frac)), color
+        self.setFixedSize(w, h)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 22))
+        p.drawRoundedRect(QRectF(self.rect()), 3, 3)
+        if self.frac > 0:
+            p.setBrush(QColor(self.color))
+            p.drawRoundedRect(QRectF(0, 0, max(4, self.width() * self.frac), self.height()), 3, 3)
+
+
+def report_card(ctx, rep):
+    """战报卡片（一张可以保存/分享的图）。"""
+    d = ctx.data
+    fr = PanelFrame(255, True)
+    fr.setFixedWidth(620)
+    lay = QVBoxLayout(fr)
+    lay.setContentsMargins(18, 14, 18, 12)
+    lay.setSpacing(4)
+    res = {True: ("胜利", GREEN), False: ("失败", RED), None: ("对局结束", DIM)}[rep["win"]]
+    mins, secs = divmod(rep["length"], 60)
+    lay.addWidget(lab("<span style='color:%s'>%s</span> &nbsp;<span style='color:%s;font-size:12px'>%s · 时长 %d:%02d</span>" % (
+        res[1], res[0], DIM, time.strftime("%Y-%m-%d %H:%M", time.localtime(rep["time"])), mins, secs), 20, TXT, True))
+    lay.addWidget(lab(esc(report.verdict(rep)), 16, GOLD, True))
+    every = [r for t in rep["teams"] for r in t["players"]]
+    mx = max([r["dmg"] for r in every] + [1])
+    for t in rep["teams"]:
+        lay.addWidget(section_title(Ctx0, "%s · %s" % ("我方" if t["mine"] else "敌方", "胜利" if t["win"] else "失败")))
+        for r in t["players"]:
+            row = QFrame()
+            row.setObjectName("prow")
+            if r["local"]:
+                row.setStyleSheet("#prow{background:rgba(230,192,104,0.13);border-radius:6px;}")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(4, 2, 4, 2)
+            rl.setSpacing(8)
+            hero = d.hero(r["cid"]) if r["cid"] else None
+            rl.addWidget(PixLabel(ctx, hero["avatar"] if hero else None, 30, 30, 6,
+                                  GOLD if r.get("badge") == "MVP" else None))
+            rl.addWidget(lab("<b>%s</b><br><span style='color:%s;font-size:10px'>%s</span>" % (
+                esc(hero["title"] if hero else "?"), DIM, esc(r["name"])), 12, GOLD if r["local"] else TXT, width=104))
+            rl.addWidget(lab("%d / <span style='color:%s'>%d</span> / %d" % (r["k"], RED, r["d"], r["a"]), 12, TXT,
+                             width=74))
+            dmg = QVBoxLayout()
+            dmg.setSpacing(1)
+            dmg.addWidget(lab("输出 %s" % format(int(r["dmg"]), ","), 10, DIM))
+            dmg.addWidget(Bar(r["dmg"] / mx, "#e6c068" if t["mine"] else "#7c95a6", 120, 6))
+            rl.addLayout(dmg)
+            tags = ([r["badge"]] if r.get("badge") else []) + r.get("titles", [])
+            rl.addWidget(lab(" ".join("<span style='color:%s'>%s</span>" % (
+                GOLD if x in ("MVP", "虽败犹荣") else GREEN, esc(x)) for x in tags), 11, TXT, wrap=True), 1)
+            rl.addWidget(lab("<b>%.0f</b>" % r["score"], 16, GOLD if r.get("badge") else TXT,
+                             align=Qt.AlignRight | Qt.AlignVCenter, width=40))
+            lay.addWidget(row)
+    lay.addWidget(lab("大腿分 = 输出 40% + 参团 25% + 承伤 15% + 治疗/护盾队友 10% + 少死 10%（本局 10 人之间比较）"
+                      " · Hex Helper", 10, DIM, wrap=True))
+    return fr
+
+
+class ReportWindow(QWidget):
+    """对局结束后弹出的战报窗口：卡片 + 复制图片 / 打开所在文件夹。"""
+
+    def __init__(self, ctx, rep, path):
+        super().__init__()
+        self.setWindowTitle("Hex Helper · 本局战报")
+        self.setWindowIcon(make_icon())
+        self.setStyleSheet("ReportWindow{background:#0c1a24;}"
+                           "QPushButton{background:#17303e;color:%s;border:1px solid #2c4a5a;border-radius:6px;"
+                           "padding:6px 12px;font-family:'%s';}"
+                           "QPushButton:hover{background:#1f4152;border-color:%s;}" % (TXT, FONT, GOLD))
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.card, self.path, self.pm = report_card(ctx, rep), path, None
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.card)
+        row = QHBoxLayout()
+        self.note = lab("", 11, DIM, wrap=True)
+        row.addWidget(self.note, 1)
+        for text, fn in (("复制图片", self.copy), ("打开所在文件夹", self.open_dir)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+
+    def save(self):
+        """图标陆续加载完后再截图保存。"""
+        self.card.layout().activate()
+        self.pm = self.card.grab()
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            ok = self.pm.save(self.path)
+        except OSError:
+            ok = False
+        self.note.setText("已保存：%s" % esc(self.path) if ok else "图片保存失败")
+        return ok
+
+    def copy(self):
+        QGuiApplication.clipboard().setPixmap(self.pm or self.card.grab())
+        self.note.setText("已复制，可以直接粘贴到 QQ / 微信")
+
+    def open_dir(self):
+        os.startfile(os.path.dirname(self.path))  # noqa: S606
+
+
 # ---------------------------------------------------------------- 控制台窗口与托盘
 def make_icon():
     pm = QPixmap(64, 64)
@@ -979,6 +1110,7 @@ class ControlWindow(QWidget):
     run_check = Signal()
     export_diag = Signal()
     quit_requested = Signal()
+    setting_changed = Signal(str, object)
 
     def __init__(self, settings, hotkeys):
         super().__init__()
@@ -1033,6 +1165,8 @@ class ControlWindow(QWidget):
                 b.clicked.connect(sig.emit)
             btns.addWidget(b)
         lay.addLayout(btns)
+        lay.addWidget(section_title(Ctx0, "显示与功能"))
+        self.add_options(lay, settings)
         lay.addWidget(section_title(Ctx0, "环境自检"))
         self.check_box = QVBoxLayout()
         self.check_box.setSpacing(2)
@@ -1056,6 +1190,35 @@ class ControlWindow(QWidget):
         row.addStretch()
         row.addWidget(b)
         lay.addLayout(row)
+
+    OPTIONS = (("show_champ_select", "选人推荐卡片"), ("show_shop_panel", "商店出装面板"),
+               ("show_offer_panel", "海克斯三选一面板"), ("aug_notes", "强化写明套路和配套出装"),
+               ("post_game_report", "赛后战报（结算后弹出并存图）"), ("import_item_set", "选人时导入出装到客户端"))
+
+    def add_options(self, lay, settings):
+        row = QHBoxLayout()
+        row.addWidget(lab("面板信息量", 13, DIM))
+        combo = QComboBox()
+        combo.addItem("标准：全部信息", "standard")
+        combo.addItem("精简：只留最关键的几行", "lite")
+        combo.setCurrentIndex(1 if settings["preset"] == "lite" else 0)
+        combo.setStyleSheet("QComboBox{background:#17303e;border:1px solid #2c4a5a;border-radius:6px;padding:4px 8px;}")
+        combo.currentIndexChanged.connect(lambda i: self.setting_changed.emit("preset", combo.itemData(i)))
+        row.addWidget(combo)
+        row.addStretch()
+        lay.addLayout(row)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(2)
+        for i, (key, text) in enumerate(self.OPTIONS):
+            cb = QCheckBox(text)
+            cb.setChecked(bool(settings[key]))
+            cb.toggled.connect(lambda v, k=key: self.setting_changed.emit(k, bool(v)))
+            grid.addWidget(cb, i // 2, i % 2)
+        lay.addLayout(grid)
+        lay.addWidget(lab("导入出装：写入客户端的装备推荐页，进游戏后在商店“推荐”里直接点买。只会增删本程序写入的那一页"
+                          "“Hex Helper · 英雄名”，你自己建的推荐页不受影响。战报图片保存在程序目录的 data/reports 文件夹。", 11, DIM,
+                          wrap=True))
 
     def set_checks(self, checks):
         while self.check_box.count():

@@ -399,6 +399,18 @@ class Data:
             self._detail[hid] = d
         return d
 
+    def ensure_item_stats(self, cid):
+        """单件装备/三件套统计（op.gg）还没拿到时补拿一次（写入客户端推荐页前用，否则推荐页会很单薄）。"""
+        hid = str(cid)
+        det = self.detail_cached(hid)
+        if det is None or det.get("itemStats"):
+            return bool(det)
+        st = self._item_stats(hid)
+        if st:
+            with self._lock:
+                det["itemStats"] = st
+        return bool(st)
+
     def detail_cached(self, cid):
         return self._detail.get(str(cid))
 

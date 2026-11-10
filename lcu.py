@@ -1,4 +1,5 @@
-"""英雄联盟客户端本地接口（LCU）。仅在本机 127.0.0.1 通信，只读。"""
+"""英雄联盟客户端本地接口（LCU）。仅在本机 127.0.0.1 通信。
+除“把推荐出装写入客户端的装备推荐页”（设置 import_item_set，默认开启，可在控制台关闭）外全部只读。"""
 import base64
 import http.client
 import json
@@ -44,21 +45,34 @@ class LCU:
         token = re.search(r"--remoting-auth-token=([\w-]+)", out)
         return LCU(int(port.group(1)), token.group(1)) if port and token else None
 
-    def get(self, path):
-        """返回解析后的 JSON；404（如不在选人阶段）返回 None；连不上抛 LCUError。"""
+    def _req(self, method, path, body=None):
         try:
-            c = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=2.5, context=self.ctx)
-            c.request("GET", path, headers={"Authorization": self.auth, "Accept": "application/json"})
+            c = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=2.5 if method == "GET" else 5,
+                                            context=self.ctx)
+            headers = {"Authorization": self.auth, "Accept": "application/json"}
+            data = None
+            if body is not None:
+                data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            c.request(method, path, body=data, headers=headers)
             r = c.getresponse()
-            body = r.read()
+            raw = r.read()
             c.close()
         except Exception as e:  # noqa: BLE001
             raise LCUError(str(e))
         if r.status == 404:
             return None
-        if r.status != 200:
+        if r.status not in (200, 201, 204):
             raise LCUError("HTTP %s %s" % (r.status, path))
-        return json.loads(body) if body else None
+        return json.loads(raw) if raw else None
+
+    def get(self, path):
+        """返回解析后的 JSON；404（如不在选人阶段）返回 None；连不上抛 LCUError。"""
+        return self._req("GET", path)
+
+    def put(self, path, body):
+        """只用于写装备推荐页。"""
+        return self._req("PUT", path, body)
 
 
 class DemoLCU:
@@ -84,4 +98,11 @@ class DemoLCU:
                     "benchChampions": [{"championId": int(c)} for c in bench]}
         if path.endswith("gameflow/v1/session"):
             return {"gameData": {"queue": {"id": 2400}}}
+        if path.endswith("current-summoner"):
+            return {"summonerId": 1, "accountId": 1}
+        if "/lol-item-sets/" in path:
+            return getattr(self, "item_sets", {"accountId": 1, "itemSets": [], "timestamp": 0})
         return None
+
+    def put(self, path, body):
+        self.item_sets = body

@@ -175,6 +175,11 @@ def key_down(code):
     return bool(code and user32.GetAsyncKeyState(code) & 0x8000)
 
 
+def key_hit(code):
+    """按着，或者自上次查询以来按过（很快的点击按下不到一个轮询周期，只看“按着”会漏掉）。"""
+    return bool(code and user32.GetAsyncKeyState(code) & 0x8001)
+
+
 def parse_hotkey(text):
     """'Ctrl+Alt+S' → (0x11, 0x12, 0x53)；识别失败返回空元组。"""
     codes = tuple(vk(p) for p in str(text).split("+") if p.strip())

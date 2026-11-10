@@ -81,12 +81,16 @@ def save_png(rect, path, max_w=1920, crop=None, min_h=0, masks=()):
         x1, y1 = min(ow, int((ml + mw - l) * ow / w) + 1), min(oh, int((mt + mh - t) * oh / h) + 1)
         if x1 > x0 and y1 > y0:
             arr[y0:y1, x0:x1, :3] = 0
-    im = Image.frombuffer("RGBA", (ow, oh), arr.tobytes(), "raw", "BGRA", 0, 1).convert("RGB")
+    gray = path.lower().endswith(".bmp")   # 给 OCR 的图存成灰度：文件只有彩色的 1/3，写盘和识别都更轻
+    im = Image.frombuffer("RGBA", (ow, oh), arr.tobytes(), "raw", "BGRA", 0, 1).convert("L" if gray else "RGB")
     if min_h and oh < min_h:
-        k = min(2.0, min_h / oh, max_w / ow)
+        k = min(2.0, min_h / oh)   # 小分辨率放大不受 max_w 限制（限制了会认不出字）
         if k > 1.05:
             im = im.resize((round(ow * k), round(oh * k)), Image.LANCZOS)
-    im.save(path, "PNG", compress_level=1)
+    if path.lower().endswith(".bmp"):
+        im.save(path, "BMP")      # 不压缩：写盘几乎不占 CPU（PNG 压缩一张 2K 图要几十毫秒，三选一期间会拖累游戏）
+    else:
+        im.save(path, "PNG", compress_level=1)
     return im.size
 
 
@@ -169,16 +173,30 @@ class OcrWorker:
         os.makedirs(work_dir, exist_ok=True)
         self.proc, self.q, self.ready, self.error, self.lang = None, queue.Queue(), False, None, None
         self.lock = threading.Lock()
+        self.stats = {"n": 0, "cap": 0.0, "ocr": 0.0}   # 本局识别次数、截图/识别累计耗时（写进日志，方便按机器配置排查）
+        self.last_error, self.t_start = None, 0.0
+
+    def dead(self):
+        """OCR 进程是否已经退出（被杀毒软件结束、系统回收等）。"""
+        return self.proc is not None and self.proc.poll() is not None
 
     def start(self):
+        self.ready, self.error, self.q, self.t_start = False, None, queue.Queue(), time.time()
+        if self.proc is not None:                 # 重启：先把旧进程的管道关掉
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+        slow_pc = (os.cpu_count() or 8) <= 4      # 4 线程及以下的机器：OCR 用“空闲”优先级，只吃游戏用剩的 CPU
+        prio = 0x40 if slow_pc else 0x4000
         script = os.path.join(self.dir, "ocr.ps1")
         with open(script, "w", encoding="utf-8-sig") as f:
             f.write(_OCR_PS)
         self.proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            creationflags=0x08000000 | 0x4000)  # 无窗口 + 低于正常优先级（不和游戏抢 CPU）
-        threading.Thread(target=self._reader, daemon=True).start()
+            creationflags=0x08000000 | prio)  # 无窗口 + 低优先级（不和游戏抢 CPU）
+        threading.Thread(target=self._reader, args=(self.proc, self.q), daemon=True).start()
         try:
             first = self.q.get(timeout=25)
         except queue.Empty:
@@ -190,10 +208,10 @@ class OcrWorker:
         self.error = "系统没有可用的中文 OCR（设置→时间和语言→语言→添加简体中文，并勾选文字识别）"
         return False
 
-    def _reader(self):
-        for raw in self.proc.stdout:
-            self.q.put(raw.decode("utf-8", "replace").rstrip("\r\n"))
-        self.q.put("EOF")
+    def _reader(self, proc, q):
+        for raw in proc.stdout:
+            q.put(raw.decode("utf-8", "replace").rstrip("\r\n"))
+        q.put("EOF")
 
     def recognize(self, png_path, timeout=10):
         """返回 [[(text,x,y,w,h), ...], ...]（每个内层列表是一行文字）。"""
@@ -202,16 +220,23 @@ class OcrWorker:
         with self.lock:
             while not self.q.empty():
                 self.q.get_nowait()
-            self.proc.stdin.write((png_path + "\n").encode("utf-8"))
-            self.proc.stdin.flush()
-            lines, cur, end = [], None, time.time() + timeout
             self.last_error = None
+            try:
+                self.proc.stdin.write((png_path + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
+            except (OSError, ValueError) as e:     # OCR 进程没了：标记为不可用，画面线程稍后会自动重启它
+                self.ready, self.last_error = False, "OCR 进程已退出（%s）" % e
+                return []
+            lines, cur, end = [], None, time.time() + timeout
             while time.time() < end:
                 try:
                     s = self.q.get(timeout=max(0.05, end - time.time()))
                 except queue.Empty:
                     break
-                if s in ("END", "EOF"):
+                if s == "EOF":
+                    self.ready, self.last_error = False, "OCR 进程已退出"
+                    break
+                if s == "END":
                     break
                 if s == "L":
                     cur = []
@@ -227,9 +252,10 @@ class OcrWorker:
         """截取 rect（可只截中间一块、保持原始清晰度）并识别；轮换临时文件名（上一张可能仍被 OCR 进程占用）。
         返回 (lines, 图宽, 图高)。同时把识别到的文字写入 last_scan.txt，方便排查识别不到的情况。"""
         w = h = 0
+        t0 = time.perf_counter()
         for _ in range(4):  # 文件若仍被占用（杀毒软件扫描等）就换下一个文件名，不让整个识别线程因此崩溃
             self._n = (getattr(self, "_n", -1) + 1) % 4
-            path = os.path.abspath(os.path.join(self.dir, "cap%d.png" % self._n))  # 必须是反斜杠的绝对路径
+            path = os.path.abspath(os.path.join(self.dir, "cap%d.bmp" % self._n))  # 必须是反斜杠的绝对路径
             try:
                 w, h = save_png(rect, path, max_w, crop, min_h, masks)
                 self.last_path = path
@@ -238,7 +264,10 @@ class OcrWorker:
                 self.last_error = "截图写入失败：%s" % e
         else:
             return [], 0, 0
+        t1 = time.perf_counter()
         lines = self.recognize(path)
+        st = self.stats
+        st["n"], st["cap"], st["ocr"] = st["n"] + 1, st["cap"] + t1 - t0, st["ocr"] + time.perf_counter() - t1
         try:
             with open(os.path.join(self.dir, "last_scan.txt"), "w", encoding="utf-8") as f:
                 f.write(time.strftime("%H:%M:%S") + " 图 %dx%d 来自 %s\n" % (w, h, os.path.basename(path)))
