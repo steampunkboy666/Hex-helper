@@ -88,11 +88,14 @@ class Helper(QObject):
         super().__init__()
         self.qapp, self.args = qapp, args
         self.settings = config.Settings()
-        self.data = Data(config.CACHE_DIR)
+        self.data = Data(config.CACHE_DIR, self.settings["region"])
         self.bus = Bus()
         self.stop = threading.Event()
         self.pool = ThreadPoolExecutor(3)
         self._fetching = set()
+        self._preview_generation = 0
+        self._preview_visible = False
+        self._load_lock = threading.Lock()
         self._item_set_for = None          # 本次选人已写入客户端出装的英雄
         self._report_for = None            # 已出过战报的对局 gameId
         self._report_busy = False
@@ -109,7 +112,7 @@ class Helper(QObject):
         self.offer_end, self._fg, self._seen_events = 0.0, True, set()
         self.game_no = 0             # 第几局（画面线程据此判断这局是否已量过商店位置）
         self._gone = None            # 上一次三选一消失时的 (那组强化, 时间, 当时记录的选择)
-        self.ocr = vision.OcrWorker(os.path.join(config.DATA_DIR, "ocr"))
+        self.ocr = vision.OcrWorker(os.path.join(config.DATA_DIR, "ocr"), self.settings["region"])
         # 窗口
         hk = self.settings["hotkeys"]
         self.control = ui.ControlWindow(self.settings, hk)
@@ -181,6 +184,8 @@ class Helper(QObject):
     # ------------------------------------------------------------ 数据
     def load_data(self, force=False):
         # 用过一次以后：先用上次缓存的数据立刻启动和显示，再在后台联网，有新数据再刷新界面
+        if not self._load_lock.acquire(blocking=False):
+            return
         if not force and not self.data.meta and self.data.load_cached():
             age, stale = self.data.meta_age(), self.data.meta_stale()
             self.log("先用本地缓存的数据（%s更新）" % ui.age_text(self.data.meta["fetched_at"]))
@@ -188,6 +193,7 @@ class Helper(QObject):
                 self.data.refreshing.add("meta")   # 先标上，第一次显示就能看到“正在后台更新”
             self.bus.data_ready.emit()
             if not stale:
+                self._load_lock.release()
                 return
             self.log("缓存已超过 %d 小时，正在后台联网更新…" % (age // 3600))
         else:
@@ -206,6 +212,8 @@ class Helper(QObject):
                     return
                 self.bus.status.emit("data", "加载失败：%s" % e, False)
                 self.run_selfcheck()
+            finally:
+                self._load_lock.release()
         threading.Thread(target=work, daemon=True).start()
 
     def start_workers(self):
@@ -265,18 +273,25 @@ class Helper(QObject):
                         self.bus.phase.emit("None")
                     self.stop.wait(20 if self.live is not None else 4)
                     continue
+                client_region = ""
+                if not self.args.demo:
+                    try:
+                        locale = lcu.get("/riotclient/region-locale") or {}
+                        client_region = " · " + " ".join(filter(None, (locale.get("region"), locale.get("locale"))))
+                    except LCUError:
+                        pass
                 phase, fails = None, 0
             try:
                 new = lcu.get("/lol-gameflow/v1/gameflow-phase") or "None"
                 fails = 0
                 if new != phase:
                     phase = new
-                    self.bus.status.emit("client", "已连接 · 当前阶段：%s" % new, True)
+                    self._item_set_for = None
+                    self.bus.status.emit("client", "已连接%s · 当前阶段：%s" % (client_region, new), True)
                     self.bus.phase.emit(new)
                     logger.info("客户端阶段：%s", new)      # 每次阶段变化都记下（排查战报为什么没弹）
                     if new == "ChampSelect":
                         queue_id, last = None, None
-                        self._item_set_for = None
                     if new in ("WaitingForStats", "PreEndOfGame", "EndOfGame"):
                         # 大乱斗结束后客户端可能停在点赞页（PreEndOfGame）就直接“再来一局”，不一定会进 EndOfGame
                         if self.settings["post_game_report"] and not self._report_busy:
@@ -296,10 +311,10 @@ class Helper(QObject):
                             self.bus.cards.emit(cands)  # 先显示卡片（榜单数据已在本地），详情在后台并发获取
                             for cid, _ in cands:
                                 self.fetch_detail_async(cid)
-                            mine = next((str(c) for c, t in cands if t == "mine"), None)
-                            if mine and mine != self._item_set_for and self.settings["import_item_set"]:
-                                self._item_set_for = mine
-                                self.pool.submit(self._guard(lambda l=lcu, h=mine: self.write_item_set(l, h)))
+                        mine = next((str(c) for c, t in cands if t == "mine"), None)
+                        if mine and mine != self._item_set_for and self.settings["import_item_set"]:
+                            self._item_set_for = mine
+                            self.pool.submit(self._guard(lambda l=lcu, h=mine: self.write_item_set(l, h)))
             except LCUError as e:
                 fails += 1
                 if fails < 4:  # 客户端在游戏中偶尔响应慢：保留凭据直接重试，不要重新发现（会启动 PowerShell）
@@ -317,6 +332,8 @@ class Helper(QObject):
     def change_setting(self, key, val):
         """控制台里改了显示/功能开关：保存并立即重画。"""
         self.settings.set(key, val)
+        if key == "import_item_set" and not val:
+            self._item_set_for = None
         self.log("设置已保存：%s = %s" % (key, val))
         self._sig = None
         if key in ("preset", "aug_notes", "show_champ_select") and self.cs.isVisible():
@@ -328,6 +345,8 @@ class Helper(QObject):
         try:
             block = None
             for _ in range(15):             # 结算数据最多等 30 秒
+                if self.stop.is_set() or not self.settings["post_game_report"]:
+                    return
                 try:
                     block = lcu.get("/lol-end-of-game/v1/eog-stats-block")
                 except LCUError:
@@ -354,6 +373,8 @@ class Helper(QObject):
         self.bus.report.emit(rep)
 
     def show_report(self, rep):
+        if not self.settings["post_game_report"]:
+            return
         name = "战报_%s.png" % time.strftime("%Y%m%d_%H%M", time.localtime(rep["time"]))
         path = os.path.join(config.DATA_DIR, "reports", name)
         w = ui.ReportWindow(ui.Ctx(self.data, self.loader, self.settings), rep, path)
@@ -369,12 +390,12 @@ class Helper(QObject):
     def write_item_set(self, lcu, hid):
         """把该英雄的推荐出装写入客户端装备推荐页（换英雄会覆盖本程序上一次写入的那页）。"""
         time.sleep(1.5)                       # 选人时可能连续换英雄：稍等一下，只写最后选定的那个
-        if hid != self._item_set_for:
+        if hid != self._item_set_for or not self.settings["import_item_set"] or self.stop.is_set():
             return
         if self.data.detail_cached(hid) is None:
             self.data.ensure_detail(hid, offline=True) or self.data.ensure_detail(hid)
         self.data.ensure_item_stats(hid)      # 单件/三件套统计没拿到时推荐页只剩几件，先补拿
-        if hid != self._item_set_for:
+        if hid != self._item_set_for or not self.settings["import_item_set"] or self.stop.is_set():
             return
         try:
             ok, msg = itemsets.import_item_set(lcu, self.data, hid)
@@ -437,10 +458,12 @@ class Helper(QObject):
     def ocr_start(self):
         if not self.settings["augment_ocr"]:
             self.bus.status.emit("ocr", "已在设置中关闭", None)
+            self.run_selfcheck()
             return
         self.bus.status.emit("ocr", "正在启动系统 OCR…", None)
         if self.ocr.start():
-            self.bus.status.emit("ocr", "就绪（系统 OCR：%s）· 出现三选一时自动识别" % self.ocr.lang, True)
+            self.log("强化识别就绪：" + self.ocr.engine_label)
+            self.bus.status.emit("ocr", "就绪（%s）· 自动识别强化选项" % self.ocr.engine_label, True)
         else:
             self.bus.status.emit("ocr", self.ocr.error or "不可用", False)
         self.run_selfcheck()  # OCR 启动结果出来后做一次完整自检
@@ -450,8 +473,8 @@ class Helper(QObject):
     # 横带上下范围按画面高度比例；左右按“画面高度的倍数”从中心算起（适配 16:10 / 21:9 / 4:3）
     @staticmethod
     def aug_crops(rect):
-        return ((vision.center_crop(rect, 0.78, 0.28, 0.56), 1600, 300),   # 标题横带；低分辨率放大到 ≥300 像素高
-                (vision.center_crop(rect, 0.78, 0.10, 0.90), 1280, 0))     # 兜底：缩小的整块中部
+        return ((vision.center_crop(rect, 0.96, 0.28, 0.56), 1920, 320 if rect[3] <= 720 else 300),   # 标题横带；低分辨率放大到 ≥300 像素高
+                (vision.center_crop(rect, 0.96, 0.10, 0.90), 1280, 0))     # 兜底：缩小的整块中部
 
     # 三选一界面里的区域（纵向占画面高度的比例）：卡片本体 / 卡片下方的“刷新”按钮 / 再下方居中的“收起”按钮
     # （实测 1920x1080：卡片 y≈0.18~0.66，刷新按钮 y≈0.69~0.72，收起按钮 y≈0.77~0.81、宽约 0.1 倍画面高度）
@@ -463,7 +486,10 @@ class Helper(QObject):
             return None
         ry = (click[1] - rect[1]) / max(1, rect[3])
         rx = (click[0] - rect[0]) / max(1, rect[2])
-        if abs(rx - 0.5) > 0.62 * rect[3] / max(1, rect[2]):
+        extent = layout.cards_extent(self.offer or [])
+        if extent and not extent[0] <= rx <= extent[1]:
+            return None
+        if not extent and abs(rx - 0.5) > 0.62 * rect[3] / max(1, rect[2]):
             return None
         if self.CARD_Y[0] <= ry < self.CARD_Y[1]:
             return "card"
@@ -472,6 +498,17 @@ class Helper(QObject):
         if self.HIDE_Y[0] <= ry < self.HIDE_Y[1] and abs(rx - 0.5) * rect[2] < 0.12 * rect[3]:
             return "hide"
         return None
+
+    @staticmethod
+    def gold_zone(rect, click):
+        """点击是否落在画面下方 HUD 的金币/商店按钮附近（HUD 按画面高度缩放、居中，所以按高度换算横向范围）。
+        实测 1920x1080：金币框约在 x≈0.55~0.63、y≈0.96~1.0；HUD 缩放不同会有偏移，所以范围放宽。"""
+        if not rect or not click:
+            return False
+        rx = (click[0] - rect[0]) / max(1, rect[2])
+        ry = (click[1] - rect[1]) / max(1, rect[3])
+        dx = (rx - 0.5) * rect[2] / max(1, rect[3])     # 距画面中心的横向距离，单位：画面高度
+        return ry >= 0.88 and -0.05 <= dx <= 0.45
 
     def small_frame(self, rect, mask=None):
         """画面缩小成 128x72 的 RGB 浮点图（本程序自己的面板区域涂掉）。返回 (图, 涂掉的区域)。"""
@@ -504,7 +541,7 @@ class Helper(QObject):
             if self.ocr.dead() and not self.ocr.error and self.settings["augment_ocr"] and time.time() - self.ocr.t_start > 30:
                 self.log("OCR 进程意外退出（可能被安全软件结束），正在重新启动…")
                 ok = self.ocr.start()
-                self.bus.status.emit("ocr", "就绪（系统 OCR：%s）· 出现三选一时自动识别" % self.ocr.lang if ok
+                self.bus.status.emit("ocr", "就绪（%s）· 自动识别强化选项" % self.ocr.engine_label if ok
                                      else (self.ocr.error or "不可用"), ok)
             rect = winfx.game_rect()
             if not rect or self.live is None or not winfx.foreground_is_game():
@@ -524,15 +561,19 @@ class Helper(QObject):
                 rescans = [now + 0.7, now + 1.8, now + 3.5]
             rescan_at = rescans[0] if rescans else 0.0
             # 用鼠标点金币/商店按钮开关商店（不按 P）：点击后 0.45 秒看一眼画面中央是不是商店底色（64x36 小图，约 17 毫秒）
-            if ev == "click" and not cur and now - gone_t > 3:
-                probe_at = now + 0.45
+            #   打开：只认点在画面下方 HUD 金币/商店按钮附近的点击。以前任何点击后都看底色，地图暗处、阵亡灰屏、
+            #   设置菜单等偶尔也像商店底色，会在对局中途突然弹出出装面板（实机反馈）。
+            #   关闭：商店开着时任何点击后都看一眼（点右上角 ×、点空白处都会关商店），误关的代价很小。
+            if ev == "click" and not cur and now - gone_t > 3 and self.last_click:
+                if self.shop_state or self.gold_zone(rect, self.last_click):
+                    probe_at = now + 0.45
             if probe_at and now >= probe_at:
                 probe_at = 0.0
                 sc = sensor.score(rect)
                 if not self.shop_state and sc >= sensor.OPEN:
-                    self.bus.shopv.emit("鼠标点开", True)
+                    self.bus.shopv.emit("鼠标点开（底色 %.2f）" % sc, True)
                 elif self.shop_state and sc <= sensor.CLOSE:
-                    self.bus.shopv.emit("鼠标关闭", False)
+                    self.bus.shopv.emit("鼠标关闭（底色 %.2f）" % sc, False)
             # ---------------- 商店面板的位置（不同机器上商店位置/大小不同，所以从画面里量，不写死）
             #  打开后 0.5 秒：用“底色法”量一次，之后每 3 秒复查（商店被拖动也能跟上）；
             #  关闭后 0.55 秒：把“开着时的图”和“关了以后的图”对比，面板出现的位置两侧都能量准，并记到设置里下次直接用。
@@ -618,7 +659,7 @@ class Helper(QObject):
                     self._ocr_err = self.ocr.last_error
                     self.log("海克斯 OCR 出错：%s" % self.ocr.last_error)
                 hits = vision.find_augments(self.data, lines, w, h)
-                if len(hits) == 2:                # 短标题（如“台风”）常被漏掉：单独放大第三张的标题再认一次
+                if len(hits) in (2, 3):                # 短标题（如“台风”）常被漏掉：单独放大第三张的标题再认一次
                     hits = vision.recover_missing(self.ocr, self.data, getattr(self.ocr, "last_path", None), hits, w, h)
                 for x in hits:                    # 裁剪图内的比例 → 整个画面的比例
                     x["cx"] = crop[0] + x["cx"] * (crop[2] - crop[0])
@@ -688,6 +729,9 @@ class Helper(QObject):
         self.set_shop(state, why)
 
     def on_phase(self, phase):
+        if phase in ("ChampSelect", "InProgress"):
+            self._preview_generation += 1
+            self._preview_visible = False
         self.phase = phase
         if phase == "ChampSelect":
             self.cs.dismissed = False
@@ -789,8 +833,8 @@ class Helper(QObject):
         if hits:
             if not self.offer:
                 snap = getattr(self, "live", None) or {}
-                self.log("识别到海克斯三选一：%s（%s级，%d:%02d）" % (
-                    " / ".join(self.data.augment_name(h["aid"]) for h in hits), snap.get("level", "?"),
+                self.log("识别到 %d 个海克斯选项：%s（%s级，%d:%02d）" % (
+                    len(hits), " / ".join(self.data.augment_name(h["aid"]) for h in hits), snap.get("level", "?"),
                     snap.get("time", 0) // 60, snap.get("time", 0) % 60))
                 g = self._gone
                 if g and frozenset(h["aid"] for h in hits) == g[0] and time.time() - g[1] < 180:
@@ -826,7 +870,7 @@ class Helper(QObject):
         """三选一推荐面板显示够久后收起，减少悬浮窗压在游戏画面上的时间（开启动态刷新率时长时间压着容易闪屏）。"""
         if self.offer and gen == getattr(self, "_offer_gen", 0):
             self.offer_hidden = True
-            self.log("三选一推荐面板已自动收起（Ctrl+Alt+A 可再调出）")
+            self.log("强化推荐面板已自动收起（Ctrl+Alt+A 可再调出）")
             self._sig = None
             self.refresh()
 
@@ -876,6 +920,10 @@ class Helper(QObject):
             self.cs.show()
         elif not cs_show and self.cs.isVisible():
             self.cs.hide()
+        if getattr(self, "_preview_visible", False) and self.live is None and not self.hidden_all:
+            return
+        if self.hidden_all or self.live is not None:
+            self._preview_visible = False
         if self.hidden_all or self.live is None or not self._fg:
             self.side.dismiss()
             self._sig = None
@@ -966,10 +1014,9 @@ class Helper(QObject):
         QTimer.singleShot(0, lambda: self.toast.say(text, rect, 5000))
 
     def refresh_shop_status(self):
-        self.bus.status.emit("shop", "按 %s 打开商店时自动出现、再按 %s 或 Esc 关闭时消失（聊天打字时不算）；"
-                                     "用鼠标点商店按钮开关时请用 %s 手动开关" % (
-                                         self.settings["shop_key"], self.settings["shop_key"],
-                                         self.settings["hotkeys"]["shop"]), True)
+        self.bus.status.emit("shop", "按 %s 或用鼠标点金币打开商店时自动出现、关闭时消失（聊天打字时不算）；"
+                                     "没跟上时可用 %s 手动开关" % (
+                                         self.settings["shop_key"], self.settings["hotkeys"]["shop"]), True)
 
     # ------------------------------------------------------------ 环境自检
     def run_selfcheck(self):
@@ -984,9 +1031,13 @@ class Helper(QObject):
         self.last_checks = checks
         bad, warn = self.control.set_checks(checks)
         self.log("自检完成：%d 项失败，%d 项警告" % (bad, warn))
+        for item in checks:
+            if item["level"] in ("fail", "warn"):
+                self.log("%s · %s" % (item["name"], item["detail"]))
         if (bad or warn) and not getattr(self, "_check_notified", False):
             self._check_notified = True
-            self.control.show()  # 有问题时自动把控制台带出来，让用户看到修复提示
+            if self.live is None and not self.args.minimized:
+                self.control.show()
             self.tray.showMessage("Hex Helper", "环境自检发现 %d 个问题，请查看控制台" % (bad + warn))
 
     def export_diag(self):
@@ -1013,25 +1064,57 @@ class Helper(QObject):
 
     def preview(self):
         """不开游戏也能看到对局内面板的样子：依次展示商店面板和海克斯面板。"""
-        hid = self.hero_id or self.champ_hero or min(self.data.meta["summary"], key=lambda k: self.data.meta["summary"][k]["rank"])
+        summary = self.data.meta.get("summary")
+        if not summary:
+            self.log("英雄数据尚未就绪，加载完成后即可预览")
+            return
+        if self.live or self.phase in ("ChampSelect", "InProgress"):
+            self.log("请在对局外预览，当前继续显示实战推荐")
+            return
+        hid = min(summary, key=lambda k: summary[k]["rank"])
+        self._preview_generation += 1
+        generation = self._preview_generation
+        game = self.game_no
         rect = winfx.screen_rect()
 
+        def active():
+            return generation == self._preview_generation and game == self.game_no and not self.hidden_all and not self.stop.is_set()
+
         def prep():
-            self.data.ensure_detail(hid)
-            QTimer.singleShot(0, show_shop)
+            self.data.ensure_detail(hid, offline=True) or self.data.ensure_detail(hid)
+            QTimer.singleShot(0, self, show_shop)
 
         def show_shop():
-            b = self.data.builds(hid, 1)
-            own = [b[0]["items"][1]["itemId"]] if b else []
-            self.side.show_shop(hid, own, 2200, rect)
-            QTimer.singleShot(6000, show_offer)
+            if not active():
+                return
+            builds = self.data.builds(hid, 1)
+            items = builds[0]["items"] if builds else []
+            owned = [items[0]["itemId"]] if items else []
+            self._preview_visible = True
+            self.side.show_shop(hid, owned, 2200, rect)
+            QTimer.singleShot(6000, self, show_offer)
+
+        def finish():
+            if active():
+                self._preview_visible = False
+                self.side.dismiss()
+                self._sig = None
+                self.refresh()
 
         def show_offer():
-            det = self.data.detail_cached(hid)
-            ids = [e["augmentId"] for e in det["allAugmentsByRarity"]["gold"][:5:2]]
-            chosen = [det["allAugmentsByRarity"]["silver"][0]["augmentId"]]
-            self.side.show_offer(hid, advisor.evaluate_offer(self.data, hid, ids, chosen), rect)
-            QTimer.singleShot(8000, lambda: (self.side.hide(), setattr(self, "_sig", None), self.refresh()))
+            if not active():
+                return
+            det = self.data.detail_cached(hid) or {}
+            by_rarity = det.get("allAugmentsByRarity", {})
+            rows = max(by_rarity.values(), key=len, default=[])
+            ids = [row["augmentId"] for row in rows[:3]]
+            if len(ids) < 3:
+                self.log("该英雄的强化样本不足，已结束预览")
+                finish()
+                return
+            self.side.show_offer(hid, advisor.evaluate_offer(self.data, hid, ids, []), rect)
+            QTimer.singleShot(8000, self, finish)
+
         self.pool.submit(self._guard(prep))
 
     # ------------------------------------------------------------ 演示流程（--demo）
@@ -1097,6 +1180,7 @@ def run():
     ap = argparse.ArgumentParser()
     ap.add_argument("--demo", action="store_true", help="不连客户端，模拟一局完整流程")
     ap.add_argument("--minimized", action="store_true", help="启动时不显示控制台窗口")
+    ap.add_argument("--refresh", action="store_true", help="启动时更新数据")
     args = ap.parse_args()
     winfx.set_dpi_aware()
     logging.basicConfig(filename=config.LOG_PATH, level=logging.INFO, encoding="utf-8",
@@ -1114,10 +1198,24 @@ def run():
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(None, "Hex Helper", "程序已经在运行（看看右下角托盘图标）。")
         return 0
+    settings = config.Settings()
+    if not args.minimized and not args.demo:
+        from PySide6.QtWidgets import QInputDialog
+        picker = QInputDialog()
+        picker.setWindowTitle(f"Hex Helper {webutil.VERSION} · 测试版 / 測試版")
+        picker.setLabelText("选择游戏服务器 ／ 選擇遊戲伺服器")
+        picker.setComboBoxItems(["国服 · 简体中文", "台服 · 繁體中文"])
+        picker.setTextValue("台服 · 繁體中文" if settings["region"] == "TW" else "国服 · 简体中文")
+        picker.setOkButtonText("启动 ／ 啟動")
+        picker.setCancelButtonText("退出")
+        if not picker.exec():
+            return 0
+        settings.set("region", "TW" if picker.textValue().startswith("台服") else "CN")
+    ui.configure_region(settings["region"])
     h = Helper(qapp, args)
     if not args.minimized:
         h.control.show()
-    h.load_data(force="--refresh" in sys.argv)
+    h.load_data(force=args.refresh)
     code = qapp.exec()
     lock.unlock()
     return code

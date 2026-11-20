@@ -98,18 +98,20 @@ def check_all(helper):
         out.append(_item("PowerShell", FAIL, "无法运行（%s）" % e, "请确认系统自带 PowerShell 未被卸载或禁用"))
     # 中文 OCR
     ocr = helper.ocr
+    language = "中文（繁體，台灣）" if helper.settings["region"] == "TW" else "中文（简体）"
     if not helper.settings["augment_ocr"]:
         out.append(_item("海克斯识别(OCR)", INFO, "已在设置中关闭"))
     elif ocr.ready:
         lang = ocr.lang or ""
         if lang.lower().startswith("zh"):
-            out.append(_item("海克斯识别(OCR)", OK, "系统 OCR 就绪（%s）" % lang))
+            out.append(_item("海克斯识别(OCR)", OK, "就绪（%s）" % ocr.engine_label))
         else:
             out.append(_item("海克斯识别(OCR)", WARN, "OCR 语言是 %s，不是中文" % lang,
-                             "设置 → 时间和语言 → 语言 → 添加“中文(简体)”并勾选“文字识别”，然后重启本程序"))
+                             f"设置 → 时间和语言 → 语言 → 添加{language}并勾选“文字识别”，然后重启本程序"))
     elif ocr.error:
         out.append(_item("海克斯识别(OCR)", FAIL, ocr.error,
-                         "设置 → 时间和语言 → 语言 → 添加“中文(简体)”并勾选“文字识别”；商店和选人功能不受影响"))
+                         f"设置 → 时间和语言 → 语言 → 添加{language}并勾选“文字识别”"
+                         if ocr.error.startswith("系统没有可用") else "查看上方启动错误"))
     else:
         out.append(_item("海克斯识别(OCR)", INFO, "尚未启动"))
     # 网络（并行检测各数据来源）
@@ -117,6 +119,9 @@ def check_all(helper):
              ("强化详情/图标 cdn.dtodo.cn", "https://cdn.dtodo.cn/hextech/champion-details/875.json", "cdn"),
              ("英雄/装备 game.gtimg.cn", "https://game.gtimg.cn/images/lol/act/img/js/heroList/hero_list.js", "base"),
              ("备用数据源 op.gg", "https://op.gg/lol/modes/aram-mayhem", "backup")]
+    if helper.settings["region"] == "TW":
+        hosts[2] = ("英雄 Data Dragon", "https://ddragon.leagueoflegends.com/api/versions.json", "base")
+        hosts.append(("台服裝備 CommunityDragon", "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/zh_tw/v1/items.json", "items"))
     res = {}
     ths = [threading.Thread(target=lambda n=n, u=u: res.__setitem__(n, _ping(u)), daemon=True) for n, u, _ in hosts]
     [t.start() for t in ths]

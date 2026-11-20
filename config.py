@@ -27,6 +27,7 @@ CACHE_DIR = os.path.join(DATA_DIR, "cache")
 LOG_PATH = os.path.join(DATA_DIR, "helper.log")
 
 DEFAULTS = {
+    "region": "CN",
     "dock_side": "right",        # 对局内面板停靠在游戏画面的 left / right
     "ui_scale": 1.0,             # 面板缩放
     "panel_opacity": 0.93,

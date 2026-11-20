@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 # 如实标明是哪个程序、去哪里找到作者（已实测 aramgg/op.gg/腾讯/图标站都不拦这种标识）
-VERSION = "1.3"
+VERSION = "1.4.0-beta.1"
 REPO = "steampunkboy666/Hex-helper"
 UA = "HexHelper/%s (+https://github.com/%s)" % (VERSION, REPO)
 MIN_GAP = {"aramgg.com": 0.4, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取
@@ -202,8 +202,12 @@ def decode_rsc(html):
 
 # ---------------------------------------------------------------- 新版本检查
 def _ver(tag):
-    """'v1.2.3' -> (1, 2, 3)；解析不了返回 ()。"""
-    return tuple(int(x) for x in re.findall(r"\d+", tag or "")[:4])
+    """同版本号下正式版排在测试版之后。"""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?(?:-beta\.(\d+))?", tag or "")
+    if not m:
+        return ()
+    major, minor, patch, beta = m.groups()
+    return int(major), int(minor), int(patch or 0), beta is None, int(beta or 0)
 
 
 def latest_release(timeout=8):

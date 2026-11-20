@@ -55,7 +55,9 @@ check("三件套和面板里的三套一致", [[i["id"] for i in b["items"]] for
 other_ids = [i["id"] for b in page["blocks"] if not b["type"].startswith("三件套") for i in b["items"]]
 check("高胜率装备/鞋子不和三件套重复", not set(other_ids) & {i["id"] for b in sets_ for i in b["items"]})
 check("推荐页至少 10 件", len(ids) >= 10, "%d 件" % len(ids))
-check("每栏标题都很短（商店推荐栏窄）", all(len(bl["type"]) <= 8 for bl in page["blocks"]),
+check("栏目标题不含“%”（游戏商店会把它当格式符，整页显示空白）", not any("%" in bl["type"] for bl in page["blocks"]),
+      " / ".join(bl["type"] for bl in page["blocks"]))
+check("每栏标题都很短（商店推荐栏窄）", all(len(bl["type"]) <= 9 for bl in page["blocks"]),
       " / ".join(bl["type"] for bl in page["blocks"]))
 # 单件统计还没拿到时（上次实测“3 组 6 件”就是这种情况）也要有完整的一页
 saved = d.detail_cached(HERO)["itemStats"]
@@ -98,6 +100,8 @@ d.ensure_detail(other, offline=True)
 itemsets.import_item_set(lcu, d, other)        # 换英雄再写一次
 uids = [s["uid"] for s in lcu.sets["itemSets"]]
 check("玩家自己的推荐页保留", "my-own-page" in uids, str(uids))
+check("本程序的推荐页排在最前（进游戏默认打开它）", uids[0].startswith(itemsets.UID_PREFIX)
+      and lcu.sets["itemSets"][0]["sortrank"] < min(s.get("sortrank", 0) for s in lcu.sets["itemSets"][1:]), str(uids))
 check("本程序的推荐页只保留最新一页（不会越堆越多）",
       sum(u.startswith(itemsets.UID_PREFIX) for u in uids) == 1 and ("hexhelper-%s" % other) in uids)
 check("写入的 accountId 正确", lcu.sets["accountId"] == 42)
@@ -321,6 +325,12 @@ st2.record_choice = lambda: (setattr(st2, "_maybe", None), None)[1]
 appmod.Helper.on_offer(st2, None)
 appmod.Helper.on_offer(st2, [dict(o, aid=o["aid"] + "z") for o in offer])
 check("没点过卡片时不乱补记", st2.chosen == [aids[1]])
+
+print("== 鼠标开商店：只认点在金币附近的点击")
+R = (0, 0, 1920, 1080)
+gz = appmod.Helper.gold_zone
+check("点金币（实测位置）算开商店", gz(R, (1130, 1062, 0)) and gz((0, 0, 2560, 1440), (1500, 1415, 0)))
+check("点画面中间、左下角、小地图不算", not gz(R, (960, 540, 0)) and not gz(R, (300, 1050, 0)) and not gz(R, (1800, 1000, 0)))
 
 bad = [n for n, ok in results if not ok]
 print("\n%d 项通过，%d 项失败" % (len(results) - len(bad), len(bad)))

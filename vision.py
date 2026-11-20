@@ -138,15 +138,23 @@ _OCR_PS = r'''
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 [Console]::InputEncoding = New-Object Text.UTF8Encoding $false
+trap { [Console]::Out.WriteLine('INITERR ' + ($_.Exception.Message -replace "[\r\n]+", ' ')); exit 1 }
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Storage.StorageFile, Windows.Foundation, ContentType = WindowsRuntime]
 $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
 function Await($op, $t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $task.Wait(-1) | Out-Null; $task.Result }
-$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'zh-Hans-CN')) }
-if (-not $engine) { [Console]::Out.WriteLine('NOENGINE'); exit 2 }
+$wanted = '__LANG__'
+$installed = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+$language = $installed | Where-Object LanguageTag -eq $wanted | Select-Object -First 1
+if (-not $language) {
+  $pattern = if ($wanted -eq 'zh-Hant-TW') { '^zh-(Hant|TW|HK|MO)(-|$)' } else { '^zh-(Hans|CN|SG)(-|$)' }
+  $language = $installed | Where-Object LanguageTag -match $pattern | Select-Object -First 1
+}
+if (-not $language) { [Console]::Out.WriteLine('NOENGINE'); exit 2 }
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($language)
+if (-not $engine) { throw "Cannot initialize OCR: $($language.LanguageTag)" }
 [Console]::Out.WriteLine('READY ' + $engine.RecognizerLanguage.LanguageTag)
 while (($line = [Console]::In.ReadLine()) -ne $null) {
   try {
@@ -168,7 +176,9 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
 
 class OcrWorker:
-    def __init__(self, work_dir):
+    def __init__(self, work_dir, region="CN"):
+        self.language = "zh-Hant-TW" if region == "TW" else "zh-Hans-CN"
+        self.portable = None
         self.dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
         self.proc, self.q, self.ready, self.error, self.lang = None, queue.Queue(), False, None, None
@@ -178,9 +188,30 @@ class OcrWorker:
 
     def dead(self):
         """OCR 进程是否已经退出（被杀毒软件结束、系统回收等）。"""
-        return self.proc is not None and self.proc.poll() is not None
+        return self.portable is None and self.proc is not None and self.proc.poll() is not None
+
+    @property
+    def engine_label(self):
+        return ("内置离线 OCR" if self.portable else "系统 OCR") + " · " + str(self.lang or self.language)
 
     def start(self):
+        try:
+            if self._start_windows():
+                return True
+        except (OSError, ValueError) as exc:
+            self.error = str(exc)
+        windows_error = self.error
+        self.stop()
+        try:
+            from portable_ocr import PortableOCR
+            self.portable = PortableOCR(self.language)
+        except Exception as exc:
+            self.error = "%s；内置 OCR 初始化失败：%s" % (windows_error, exc)
+            return False
+        self.ready, self.lang, self.error = True, self.language, None
+        return True
+
+    def _start_windows(self):
         self.ready, self.error, self.q, self.t_start = False, None, queue.Queue(), time.time()
         if self.proc is not None:                 # 重启：先把旧进程的管道关掉
             try:
@@ -191,7 +222,7 @@ class OcrWorker:
         prio = 0x40 if slow_pc else 0x4000
         script = os.path.join(self.dir, "ocr.ps1")
         with open(script, "w", encoding="utf-8-sig") as f:
-            f.write(_OCR_PS)
+            f.write(_OCR_PS.replace("__LANG__", self.language))
         self.proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -205,7 +236,10 @@ class OcrWorker:
         if first.startswith("READY"):
             self.ready, self.lang = True, first.split(" ", 1)[1]
             return True
-        self.error = "系统没有可用的中文 OCR（设置→时间和语言→语言→添加简体中文，并勾选文字识别）"
+        if first != "NOENGINE":
+            self.error = "OCR 引擎启动失败：%s" % first.removeprefix("INITERR ")
+            return False
+        self.error = "系统没有可用的中文 OCR（设置→时间和语言→语言→添加 %s，并勾选文字识别）" % self.language
         return False
 
     def _reader(self, proc, q):
@@ -218,6 +252,13 @@ class OcrWorker:
         if not self.ready:
             return []
         with self.lock:
+            if self.portable:
+                try:
+                    self.last_error = None
+                    return self.portable.read(png_path)
+                except (OSError, RuntimeError) as exc:
+                    self.last_error = str(exc)
+                    return []
             while not self.q.empty():
                 self.q.get_nowait()
             self.last_error = None
@@ -277,6 +318,11 @@ class OcrWorker:
         return lines, w, h
 
     def stop(self):
+        self.ready = False
+        with self.lock:
+            if self.portable:
+                self.portable.close()
+                self.portable = None
         try:
             self.proc.kill()
         except Exception:  # noqa: BLE001
@@ -304,16 +350,32 @@ def _close_name(data, text):
 
 def recover_missing(ocr, data, path, hits, W, H):
     """三张卡片只认出两张时，按卡片等间距推算第三张的位置，把它的标题单独放大、二值化后再识别一次。"""
-    if len(hits) != 2 or not path:
+    if len(hits) not in (2, 3) or not path:
         return hits
     from PIL import Image, ImageOps
-    a, b = sorted(hits, key=lambda h: h["cx"])
-    d = b["cx"] - a["cx"]
-    cands = [(a["cx"] + b["cx"]) / 2] if d > 0.3 else [a["cx"] - d, b["cx"] + d]
-    cx = min(cands, key=lambda c: abs((a["cx"] + b["cx"] + c) / 3 - 0.5))
+    xs = sorted(h["cx"] for h in hits)
+    if len(xs) == 2:
+        d = xs[1] - xs[0]
+        cands = [(xs[0] + xs[1]) / 2] if d > 0.3 else [xs[0] - d, xs[1] + d]
+        cx = min(cands, key=lambda c: abs((sum(xs) + c) / 3 - 0.5))
+    else:
+        # 四张等距卡片以画面中线为中心。拟合三个已读中心，
+        # 常规对称的三张不会满足四列几何条件，也不会额外启动 OCR。
+        offsets = (-1.5, -0.5, 0.5, 1.5)
+        candidates = []
+        for missing in range(4):
+            present = [v for i, v in enumerate(offsets) if i != missing]
+            step = sum((x - 0.5) * v for x, v in zip(xs, present)) / sum(v*v for v in present)
+            error = max(abs(x - 0.5 - step*v) for x, v in zip(xs, present))
+            if step > 0.08 and error < 0.13 * step:
+                candidates.append((error, 0.5 + offsets[missing] * step))
+        if not candidates:
+            return hits
+        cx = min(candidates)[1]
     if not 0.03 < cx < 0.97:
         return hits
-    cy = (a["cy"] + b["cy"]) / 2
+    known = {h["aid"] for h in hits}
+    cy = sum(h["cy"] for h in hits) / len(hits)
     aid = None
     try:
         g = ImageOps.grayscale(Image.open(path))
@@ -328,11 +390,11 @@ def recover_missing(ocr, data, path, hits, W, H):
             page.paste(t, (100, 60))
             page.save(p)
             aid = _close_name(data, "".join(w[0] for ln in ocr.recognize(p) for w in ln))
-            if aid and aid not in (a["aid"], b["aid"]):
+            if aid and aid not in known:
                 break
     except OSError:
         return hits
-    if aid and aid not in (a["aid"], b["aid"]):
+    if aid and aid not in known:
         return sorted(hits + [{"aid": aid, "cx": cx, "cy": cy}], key=lambda h: h["cx"])
     return hits
 
@@ -392,4 +454,4 @@ def find_augments(data, ocr_lines, W, H):
         sep = [c for i, c in enumerate(cand) if i == 0 or c["cx"] - cand[i - 1]["cx"] > 0.08]
         if len(sep) > len(best):
             best = sep
-    return best[:3] if len(best) >= 2 else []
+    return best if 2 <= len(best) <= 4 else []

@@ -12,6 +12,7 @@ import threading
 import time
 
 import sources as S
+import taiwan
 from webutil import http_get, parse_module  # noqa: F401  (其他模块从这里导入)
 
 SCHEMA = 5
@@ -44,7 +45,10 @@ def _write(path, obj):
 
 
 class Data:
-    def __init__(self, cache_dir):
+    def __init__(self, cache_dir, region="CN"):
+        self.region = region
+        if region == "TW":
+            cache_dir = os.path.join(cache_dir, "TW")
         self.dir = cache_dir
         os.makedirs(os.path.join(cache_dir, "detail"), exist_ok=True)
         self.meta_path = os.path.join(cache_dir, "meta.json")
@@ -82,14 +86,14 @@ class Data:
         return time.time() - self.meta["fetched_at"] if self.meta.get("fetched_at") else float("inf")
 
     def meta_stale(self):
-        return self.meta_age() >= CACHE_TTL
+        return self.meta_age() >= CACHE_TTL or not self.meta.get("mode_catalog")
 
     def load(self, force=False, log=print):
         cached = _read(self.meta_path)
         if cached and cached.get("schema") != SCHEMA:
             cached = None
         age = (time.time() - cached.get("fetched_at", 0)) if cached else 1e18
-        if cached and not force and age < CACHE_TTL:
+        if cached and cached.get("mode_catalog") and not force and age < CACHE_TTL:
             self.meta = cached
             return
         self._down.clear()
@@ -119,27 +123,36 @@ class Data:
                 errors.append("douhunwiki.cn：%s" % e)
                 raise RuntimeError("无法获取数据且没有本地缓存 —— " + "；".join(errors))
         self.meta = meta
+        self._aug_names = None
         _write(self.meta_path, meta)
 
     def _common(self, cached):
         c = cached or {}
         out = []
-        for fn, key in ((S.official_heroes, "heroes"), (S.official_items, "items")):
+        heroes, items = (taiwan.heroes, taiwan.items) if self.region == "TW" else (S.official_heroes, S.official_items)
+        for fn, key in ((heroes, "heroes"), (items, "items")):
             try:
                 out.append(fn())
             except Exception:  # noqa: BLE001
                 out.append(c.get(key))
         if not out[0] or not out[1]:
-            raise RuntimeError("无法获取英雄/装备基础数据（game.gtimg.cn）")
+            raise RuntimeError("无法获取英雄/装备基础数据（%s）" % self.region)
         try:
-            cat = S.aramgg_catalog()
+            cat = taiwan.augments(S.aramgg_catalog) if self.region == "TW" else S.aramgg_catalog()
         except Exception:  # noqa: BLE001
             cat = c.get("augments")
-        return out[0], out[1], cat
+        try:
+            game_catalog = S.game_augment_catalog(self.region)
+        except (OSError, ValueError, KeyError, RuntimeError):
+            game_catalog = c.get("augments") or {}
+        merged = dict(game_catalog)
+        for aid, entry in (cat or {}).items():
+            merged[aid] = dict(entry, name=game_catalog.get(aid, entry)["name"])
+        return out[0], out[1], merged
 
     def _pack(self, source, summary, version, updated, heroes, items, cat, **extra):
         summary = {k: v for k, v in summary.items() if k in heroes}
-        return {"schema": SCHEMA, "fetched_at": time.time(), "source": source, "version": version,
+        return {"schema": SCHEMA, "mode_catalog": True, "fetched_at": time.time(), "source": source, "version": version,
                 "updated": updated, "total": len(summary), "heroes": heroes, "augments": cat or {}, "items": items,
                 "summary": summary, **extra}
 
@@ -156,12 +169,20 @@ class Data:
         summary, keys, ver, upd = S.opgg_summary()
         heroes, items, cat = self._common(cached)
         if not cat:
+            if self.region == "TW":
+                raise RuntimeError("無法取得台服增幅裝置目錄")
             cat = S.douhun_meta()[1]
         return self._pack("opgg", summary, ver, upd, heroes, items, cat, opgg_keys=keys)
 
     def _meta_douhun(self, cached):
         summary, cat, ver, upd, files = S.douhun_meta()
-        heroes, items, _ = self._common(cached)
+        heroes, items, local_cat = self._common(cached)
+        if self.region != "TW":
+            cat = {**cat, **(local_cat or {})}
+        if self.region == "TW":
+            if not local_cat:
+                raise RuntimeError("無法取得台服增幅裝置目錄")
+            cat = local_cat
         self._douhun_files = files
         return self._pack("douhun", summary, ver, upd, heroes, items, cat, douhun_files=files)
 
@@ -363,7 +384,7 @@ class Data:
         hid = str(cid)
         with self._lock:
             hit = self._detail.get(hid)
-            if hit and (offline or not hit["stale"]):
+            if hit and (offline or not self.detail_stale(hid)):
                 return hit
         aug, build = self._augment_entries(hid, offline), self._builds(hid, offline)
         items = self._item_stats(hid, offline)
@@ -417,7 +438,7 @@ class Data:
     def detail_stale(self, cid):
         """内存里没有这个英雄的数据，或者是超过 12 小时的旧数据。"""
         det = self._detail.get(str(cid))
-        return det is None or det["stale"]
+        return det is None or time.time() - det["fetched_at"] >= DETAIL_TTL
 
     def _boots_ids(self, cid):
         st = (self.detail_cached(cid) or {}).get("itemStats") or {}
@@ -450,7 +471,7 @@ class Data:
                      "label": "三件套 %d" % (k + 1), "source": "opgg"} for k, c in enumerate(ok[:limit])]
         out = []
         for b in self._aramgg_builds(cid):
-            items = [i for i in b["items"] if self._no_boots(cid, i["itemId"])]
+            items = [dict(i, **(self.item(i["itemId"]) or {})) for i in b["items"] if self._no_boots(cid, i["itemId"])]
             if items:
                 out.append(dict(b, items=items, label=(b.get("label") or "") + ("（已去掉鞋子）" if len(items) < len(b["items"]) else "")))
         seen, uniq = set(), []

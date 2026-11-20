@@ -70,7 +70,7 @@ def rate_augment(data, hid, aid):
     rk = RARITY_KEYS[a["rarity"]] if a["rarity"] in (0, 1, 2) else "silver"
     lst = _hero_list(data, hid, rk)
     r = {"aid": str(aid), "name": a["name"], "rarity": a["rarity"], "rname": RARITY_NAMES[min(a["rarity"], 2)],
-         "icon": a.get("icon"), "desc": a.get("desc", ""), "tags": aug_tags(a),
+         "icon": a.get("icon"), "desc": a.get("desc", ""), "rules_desc": a.get("rules", a).get("desc", ""), "tags": aug_tags(a.get("rules", a)),
          "wr": None, "perf": None, "tier": None, "rank": None, "total": len(lst), "pick": None, "play": None,
          "source": "none", "score": 0.45}
     for i, e in enumerate(lst):
@@ -167,7 +167,7 @@ MOVE_WORDS = ("冲刺", "闪烁", "位移", "传送")
 
 def style_of(tags, aug=None):
     """强化标签 → 套路名列表（最多两个，去重）。“移动速度”几乎每张强化都顺带有，只有冲刺/闪烁类才算机动套路。"""
-    if aug is not None and "位移" in tags and not any(w in (aug.get("desc") or "") for w in MOVE_WORDS):
+    if aug is not None and "位移" in tags and not any(w in (aug.get("rules_desc", aug.get("desc")) or "") for w in MOVE_WORDS):
         tags = tags - {"位移"}
     out = []
     for t, name in STYLE_NAMES:
@@ -275,10 +275,13 @@ def evaluate_offer(data, hid, offered_ids, chosen_ids):
         x["combo"], x["combo_info"] = combo_bonus(data, hid, x, chosen)
         x["tag_bonus"] = tag_bonus(x, chosen, arch) if chosen else 0.0
         x["final"] = x["score"] + x["combo"] + x["tag_bonus"]
+        if x["source"] == "none":
+            x["final"] = None
         opts.append(x)
-    if opts:
-        max(opts, key=lambda o: o["final"])["best"] = True
-        for k, o in enumerate(sorted(opts, key=lambda o: -o["final"])):
+    ranked = [o for o in opts if o["final"] is not None]
+    if ranked:
+        max(ranked, key=lambda o: o["final"])["best"] = True
+        for k, o in enumerate(sorted(ranked, key=lambda o: -o["final"])):
             o["order"] = k + 1  # 三个选项之间的推荐顺序（选项本身仍按屏幕上从左到右排列）
     return {"options": opts, "chosen": chosen}
 

@@ -59,6 +59,9 @@ def build_item_set(data, hid):
                 out.append({"id": i, "count": 1})
         used.update(seen)
         if out:
+            if getattr(data, "region", "CN") == "TW":
+                from taiwan import traditional
+                title = traditional(title)
             blocks.append({"type": title, "items": out, "hideIfSummonerSpell": "", "showIfSummonerSpell": ""})
 
     top = [_iid(i) for i in data.top_items(hid, 8)]
@@ -68,7 +71,8 @@ def build_item_set(data, hid):
         core = [_iid(i) for i in b.get("items", [])]
         core += [i for i in pool if i not in core][:max(0, 3 - len(core))]
         wr = b.get("winRate")
-        block("三件套%d" % n + (" %.0f%%" % (wr * 100) if wr else ""), core, 3, share=True)
+        # 标题里不放“%”：游戏内商店把栏目标题当格式化字符串处理，带“%”时推荐页可能整页显示成空白
+        block("三件套%d" % n + (" 胜率%.0f" % (wr * 100) if wr else ""), core, 3, share=True)
     block("高胜率装备", pool, 6)
     block("鞋子", _boots(data, hid), 2)
     if not blocks:
@@ -80,9 +84,13 @@ def build_item_set(data, hid):
 
 
 def merge_sets(existing, new_set):
-    """去掉本程序以前写入的页，保留玩家自己的页，再放入新的一页。"""
+    """去掉本程序以前写入的页，保留玩家自己的页，新的一页放在最前面。
+    游戏内商店默认打开排在最前面（sortrank 最小）的那一页：放在后面时，进游戏默认显示的是玩家以前建的
+    （可能是空的“新的配装方案”）页，要切换下拉框或改一次商店缩放才会看到本程序的页。"""
     keep = [s for s in (existing or []) if not str(s.get("uid", "")).startswith(UID_PREFIX)]
-    return keep + [new_set]
+    ranks = [s.get("sortrank") for s in keep if isinstance(s.get("sortrank"), int)]
+    new_set = dict(new_set, sortrank=min(ranks + [0]) - 1)   # 没写 sortrank 的页按 0 算
+    return [new_set] + keep
 
 
 def import_item_set(lcu, data, hid):

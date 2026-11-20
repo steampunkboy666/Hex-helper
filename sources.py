@@ -65,8 +65,8 @@ def aramgg_summary():
     return summary, str(rows[0].get("version")), max(r.get("date") or "" for r in rows)
 
 
-def aramgg_catalog():
-    j = json.loads(http_get(A_BASE + "/data/aram-mayhem-augments.zh_cn.json"))
+def aramgg_catalog(locale="zh_cn"):
+    j = json.loads(http_get(A_BASE + "/data/aram-mayhem-augments.%s.json" % locale))
     out = {}
     for k, v in j.items():
         if not isinstance(v, dict) or not v.get("displayName"):
@@ -76,6 +76,30 @@ def aramgg_catalog():
                        "icon": "%s/augment-icons/%s" % (A_CDN, icon) if icon else None, "enabled": v.get("enabled", True)}
     if len(out) < 50:
         raise ValueError("aramgg 强化目录异常")
+    return out
+
+
+def game_augment_catalog(region):
+    """当前版本的 KIWI 模式强化名录，可早于胜率站收录新卡。"""
+    locale = "zh_tw" if region == "TW" else "zh_cn"
+    base = "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global"
+    prefix = f"{base}/{locale}/v1/"
+    groups = json.loads(http_get(prefix + "augment-lists.json", retries=0, timeout=8))
+    keys = {path.rsplit("/", 1)[-1] for group in groups if group["modeName"] == "KIWI"
+            for path in group["augmentList"]}
+    rows = json.loads(http_get(prefix + "cherry-augments.json", retries=0, timeout=8))
+    rarities = {"kSilver": 0, "kGold": 1, "kPrismatic": 2}
+    out = {}
+    for row in rows:
+        name = (row.get("nameTRA") or "").strip()
+        if not name or row["augmentNameId"] not in keys or row.get("rarity") not in rarities:
+            continue
+        icon = row.get("augmentLargeIconPath", "").lower().partition("/lol-game-data/assets/")[2]
+        out[str(row["id"])] = {"name": name, "desc": _strip(row.get("summaryDescription")),
+                               "rarity": rarities[row["rarity"]], "enabled": True,
+                               "icon": f"{base}/default/{icon}" if icon else None}
+    if not out:
+        raise ValueError("KIWI 强化名录为空")
     return out
 
 

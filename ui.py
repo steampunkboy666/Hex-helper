@@ -10,12 +10,13 @@ from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
-                               QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import advisor
 import report
 import layout
 import webutil
+import taiwan
 import winfx
 
 FONT = "Microsoft YaHei UI"
@@ -25,6 +26,20 @@ BG = QColor(8, 16, 24)
 RARITY_COL = {0: "#c9d1d8", 1: "#f0c24b", 2: "#ff7ad9"}
 TIER_COL = {"0": "#f0c24b", "1": "#f0c24b", "2": "#5ee0a0", "3": "#6cc0ff", "4": "#9aa7b2", "5": "#7a7f87"}
 TAG_TEXT = {"mine": "当前", "bench": "板凳", "team": "队友"}
+
+
+def configure_region(region):
+    global display_text, FONT
+    display_text = taiwan.traditional if region == "TW" else str
+    FONT = "Microsoft JhengHei UI" if region == "TW" else "Microsoft YaHei UI"
+
+
+display_text = str
+
+
+class DisplayLabel(QLabel):
+    def setText(self, text):
+        super().setText(display_text(text))
 
 
 def tier_text(t):
@@ -120,7 +135,7 @@ def auto_scale(logical_h):
 
 # ---------------------------------------------------------------- 基础控件
 def lab(text, size=12, color=TXT, bold=False, wrap=False, width=None, align=None):
-    w = QLabel(text)
+    w = DisplayLabel(display_text(text))
     w.setStyleSheet("color:%s;font-family:'%s';font-size:%dpx;font-weight:%s;background:transparent;" % (
         color, FONT, size, "bold" if bold else "normal"))
     w.setTextFormat(Qt.RichText)
@@ -327,8 +342,8 @@ def freshness(ctx, hid, short=False):
     d = ctx.data
     det = d.detail_cached(hid)
     ts = det["fetched_at"] if det else d.meta.get("fetched_at")
-    busy = hid in d.refreshing or "meta" in d.refreshing
-    stale = (det["stale"] if det else True) or d.meta_stale()
+    busy = str(hid) in d.refreshing or "meta" in d.refreshing
+    stale = (det is not None and d.detail_stale(hid)) or d.meta_stale()
     col = YELLOW if stale else GREEN
     text = age_text(ts)
     if short:
@@ -464,7 +479,7 @@ class ChampSelectWindow(QWidget):
         hl.addWidget(self.title)
         hl.addStretch()
         for text, fn in (("收起", self.toggle), ("关闭", self.dismiss)):
-            b = QPushButton(text)
+            b = QPushButton(display_text(text))
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet("QPushButton{color:%s;background:rgba(255,255,255,0.06);border:none;border-radius:5px;"
                             "padding:3px 10px;font-family:'%s';font-size:11px;}QPushButton:hover{color:%s;"
@@ -821,8 +836,8 @@ class SidePanel(QWidget):
                     "已选 %d 个 &nbsp;|&nbsp; %s" % (len(ev["chosen"]), "评分取自该英雄的选取胜率" if d.meta.get("source") == "aramgg"
                                                   else "评分取自 %s 梯队（无胜率）" % d.source_label()))
         self._n_opts = len(ev["options"])
-        if ev["options"]:
-            rank = sorted(ev["options"], key=lambda o: o["order"])
+        rank = sorted((o for o in ev["options"] if o.get("order")), key=lambda o: o["order"])
+        if rank:
             lay.addWidget(lab("推荐顺序：" + " &gt; ".join("<b style='color:%s'>%s</b>" % (GOLD if i == 0 else TXT, esc(o["name"]))
                                                        for i, o in enumerate(rank)), S(12), TXT, wrap=True))
         for i, o in enumerate(ev["options"]):
@@ -857,7 +872,7 @@ class SidePanel(QWidget):
         col.setSpacing(S(1))
         tcol = TIER_COL.get(o["tier"], DIM)
         rank = "第%d/%d" % (o["rank"], o["total"]) if o["rank"] else ""
-        pos = {1: "左", 2: "中", 3: "右"}.get(idx, str(idx)) if self._n_opts == 3 else str(idx)
+        pos = {1: "左", 2: "中", 3: "右"}.get(idx, str(idx)) if self._n_opts == 3 else "从左第%d张" % idx
         order = o.get("order")
         col.addWidget(lab("<span style='color:%s'>%s</span> &nbsp;<b>%s</b> &nbsp;<span style='color:%s;font-size:%dpx'>%s</span>%s" % (
             DIM, pos, esc(o["name"]), RARITY_COL[o["rarity"]], S(10), o["rname"],
@@ -1048,7 +1063,7 @@ class ReportWindow(QWidget):
         self.note = lab("", 11, DIM, wrap=True)
         row.addWidget(self.note, 1)
         for text, fn in (("复制图片", self.copy), ("打开所在文件夹", self.open_dir)):
-            b = QPushButton(text)
+            b = QPushButton(display_text(text))
             b.clicked.connect(fn)
             row.addWidget(b)
         lay.addLayout(row)
@@ -1114,7 +1129,7 @@ class ControlWindow(QWidget):
 
     def __init__(self, settings, hotkeys):
         super().__init__()
-        self.setWindowTitle("Hex Helper · 海克斯大乱斗助手")
+        self.setWindowTitle(display_text(f"Hex Helper {webutil.VERSION} · 测试版"))
         self.setWindowIcon(make_icon())
         self.setMinimumWidth(520)
         self.setStyleSheet("QWidget{background:#0c1a24;color:%s;font-family:'%s';font-size:13px;}"
@@ -1122,11 +1137,23 @@ class ControlWindow(QWidget):
                            "QPushButton:hover{background:#1f4152;border-color:%s;}"
                            "QPlainTextEdit{background:#08121a;border:1px solid #1d3441;border-radius:6px;color:#9fb6c3;"
                            "font-size:11px;}" % (TXT, FONT, GOLD))
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        available = self.screen().availableGeometry()
+        self.resize(min(640, available.width()), min(850, max(300, available.height() - 80)))
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
         lay.addWidget(lab("Hex Helper <span style='font-size:13px;color:#8da3b0'>海克斯大乱斗助手</span>", 20, GOLD, True))
-        lay.addWidget(lab("保持本程序运行即可：选人时自动弹出推荐，进游戏后打开商店/出现海克斯三选一时自动在画面一侧提示。", 12, DIM, wrap=True))
+        lay.addWidget(lab("保持本程序运行即可：选人时自动弹出推荐，进游戏后打开商店/出现强化选择时自动在画面一侧提示。", 12, DIM, wrap=True))
+        if settings["region"] == "TW":
+            lay.addWidget(lab("台服 · 繁體中文　｜　推薦採用資料站共用統計", 12, GOLD))
         about = lab("作者 steampunk boy · <a style='color:%s' href='https://github.com/steampunkboy666/Hex-helper'>github.com/steampunkboy666/Hex-helper</a>"
                     " · 许可 CC BY-NC-ND 4.0：可免费使用和原样分享，禁止商用，未经授权不得发布修改版" % GOLD, 11, DIM, wrap=True)
         about.setOpenExternalLinks(True)
@@ -1145,18 +1172,18 @@ class ControlWindow(QWidget):
             self.rows[key] = v
             lay.addLayout(r)
         hk = settings["hotkeys"]
-        lay.addWidget(lab("商店面板：按游戏里的商店键（%s）打开商店时自动出现，再按 %s 或 Esc 关闭时消失（聊天打字时不算）。"
-                          "用鼠标点商店按钮开关时，请用 <b>%s</b> 手动开关。" % (settings["shop_key"], settings["shop_key"], hk["shop"]),
+        lay.addWidget(lab("商店面板：按游戏里的商店键（%s）或用鼠标点金币打开商店时自动出现，再按 %s、Esc 或点 × 关闭时消失"
+                          "（聊天打字时不算）。没跟上时可用 <b>%s</b> 手动开关。" % (settings["shop_key"], settings["shop_key"], hk["shop"]),
                           12, TXT, wrap=True))
         lay.addWidget(lab("其他快捷键（都是组合键，不会和游戏按键冲突）：<b>%s</b> 强化速查 &nbsp; <b>%s</b> 撤销上一个已选强化 &nbsp; "
                           "<b>%s</b> 隐藏/显示全部面板" % (hk["augment"], hk["undo"], hk["hide"]), 12, DIM, wrap=True))
         lay.addWidget(lab("游戏里调整面板：<b>%s</b> 放大 &nbsp; <b>%s</b> 缩小 &nbsp; <b>%s</b> 放左边 &nbsp; <b>%s</b> 放右边。"
-                          "面板会自动避开商店和三选一卡片，位置/大小在不同电脑上自动适应。" % (
+                          "面板会自动避开商店和强化卡片，位置/大小在不同电脑上自动适应。" % (
                               hk["bigger"], hk["smaller"], hk["dock_left"], hk["dock_right"]), 12, DIM, wrap=True))
         btns = QHBoxLayout()
         for text, sig in (("预览效果", self.preview), ("面板换边", self.toggle_side), ("面板 −", None), ("面板 ＋", None),
                           ("更新数据", self.refresh_data)):
-            b = QPushButton(text)
+            b = QPushButton(display_text(text))
             if text == "面板 −":
                 b.clicked.connect(lambda: self.scale_changed.emit(-0.1))
             elif text == "面板 ＋":
@@ -1174,7 +1201,7 @@ class ControlWindow(QWidget):
         self.check_box.addWidget(lab("正在自检…", 12, DIM))
         cb = QHBoxLayout()
         for text, sig in (("重新自检", self.run_check), ("导出诊断文件", self.export_diag)):
-            b = QPushButton(text)
+            b = QPushButton(display_text(text))
             b.clicked.connect(sig.emit)
             cb.addWidget(b)
         cb.addStretch()
@@ -1185,22 +1212,22 @@ class ControlWindow(QWidget):
         self.log.setFixedHeight(100)
         lay.addWidget(self.log)
         row = QHBoxLayout()
-        b = QPushButton("退出程序")
+        b = QPushButton(display_text("退出程序"))
         b.clicked.connect(self.quit_requested.emit)
         row.addStretch()
         row.addWidget(b)
         lay.addLayout(row)
 
     OPTIONS = (("show_champ_select", "选人推荐卡片"), ("show_shop_panel", "商店出装面板"),
-               ("show_offer_panel", "海克斯三选一面板"), ("aug_notes", "强化写明套路和配套出装"),
+               ("show_offer_panel", "海克斯强化选择面板"), ("aug_notes", "强化写明套路和配套出装"),
                ("post_game_report", "赛后战报（结算后弹出并存图）"), ("import_item_set", "选人时导入出装到客户端"))
 
     def add_options(self, lay, settings):
         row = QHBoxLayout()
         row.addWidget(lab("面板信息量", 13, DIM))
         combo = QComboBox()
-        combo.addItem("标准：全部信息", "standard")
-        combo.addItem("精简：只留最关键的几行", "lite")
+        combo.addItem(display_text("标准：全部信息"), "standard")
+        combo.addItem(display_text("精简：只留最关键的几行"), "lite")
         combo.setCurrentIndex(1 if settings["preset"] == "lite" else 0)
         combo.setStyleSheet("QComboBox{background:#17303e;border:1px solid #2c4a5a;border-radius:6px;padding:4px 8px;}")
         combo.currentIndexChanged.connect(lambda i: self.setting_changed.emit("preset", combo.itemData(i)))
@@ -1211,7 +1238,7 @@ class ControlWindow(QWidget):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(2)
         for i, (key, text) in enumerate(self.OPTIONS):
-            cb = QCheckBox(text)
+            cb = QCheckBox(display_text(text))
             cb.setChecked(bool(settings[key]))
             cb.toggled.connect(lambda v, k=key: self.setting_changed.emit(k, bool(v)))
             grid.addWidget(cb, i // 2, i % 2)
@@ -1233,7 +1260,6 @@ class ControlWindow(QWidget):
             self.check_box.addWidget(lab(html, 12, TXT, wrap=True))
         bad = sum(1 for c in checks if c["level"] == "fail")
         warn = sum(1 for c in checks if c["level"] == "warn")
-        self.adjustSize()
         return bad, warn
 
     def set_status(self, key, text, ok=None):
