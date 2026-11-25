@@ -10,6 +10,7 @@ import urllib.request
 
 # 如实标明是哪个程序、去哪里找到作者（已实测 aramgg/op.gg/腾讯/图标站都不拦这种标识）
 VERSION = "1.4.0"
+VERSION_TITLE = f"Hex Helper {VERSION} · " + ("测试版" if "-" in VERSION else "正式版")
 REPO = "steampunkboy666/Hex-helper"
 UA = "HexHelper/%s (+https://github.com/%s)" % (VERSION, REPO)
 MIN_GAP = {"aramgg.com": 0.4, "haidoubang.com": 0.5, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取

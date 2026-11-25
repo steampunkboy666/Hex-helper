@@ -4,9 +4,9 @@
 
 Windows 桌面助手，适用于英雄联盟海克斯大乱斗（ARAM Mayhem）。选人时比较英雄强度，打开商店时查看出装，选择强化时根据当前英雄和已选强化比较候选项。
 
-**[下载最新版](https://github.com/steampunkboy666/Hex-helper/releases/latest)**　·　[版本记录](https://github.com/steampunkboy666/Hex-helper/releases)　·　[反馈问题](https://github.com/steampunkboy666/Hex-helper/issues/new/choose)
+**[下载最新正式版](https://github.com/steampunkboy666/Hex-helper/releases/latest)**　·　[版本记录](https://github.com/steampunkboy666/Hex-helper/releases)　·　[反馈问题](https://github.com/steampunkboy666/Hex-helper/issues/new/choose)
 
-## 最新稳定版 v1.4.0
+## 最新正式版 v1.4.0
 
 支持国服和台服官方简繁译名，内置离线 OCR，并支持三选一和四选一。关闭商店后，助手会根据画面自动收起出装面板。反馈入口可提交截图、复现描述和诊断摘要。
 

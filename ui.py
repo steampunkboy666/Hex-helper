@@ -1149,7 +1149,7 @@ class ControlWindow(QWidget):
 
     def __init__(self, settings, hotkeys):
         super().__init__()
-        self.setWindowTitle(display_text(f"Hex Helper {webutil.VERSION} · 测试版"))
+        self.setWindowTitle(display_text(webutil.VERSION_TITLE))
         self.setWindowIcon(make_icon())
         self.setMinimumWidth(520)
         self.setStyleSheet("QWidget{background:#0c1a24;color:%s;font-family:'%s';font-size:13px;}"

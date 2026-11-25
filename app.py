@@ -1239,7 +1239,7 @@ def run():
     if not args.minimized and not args.demo:
         from PySide6.QtWidgets import QInputDialog
         picker = QInputDialog()
-        picker.setWindowTitle(f"Hex Helper {webutil.VERSION} · 测试版 / 測試版")
+        picker.setWindowTitle(webutil.VERSION_TITLE)
         picker.setLabelText("选择游戏服务器 ／ 選擇遊戲伺服器")
         picker.setComboBoxItems(["国服 · 简体中文", "台服 · 繁體中文"])
         picker.setTextValue("台服 · 繁體中文" if settings["region"] == "TW" else "国服 · 简体中文")
