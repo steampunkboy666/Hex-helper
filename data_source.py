@@ -1,16 +1,11 @@
-"""数据仓库：多数据源 + 本地缓存 + 自动降级。
-
-英雄榜/强化统计：aramgg.com（主）→ op.gg（备，无胜率）→ 本地缓存 → douhunwiki.cn（最后兜底，可能很旧）
-出装：aramgg.com → 本地缓存 → douhunwiki.cn（op.gg 的出装表无法可靠解析，不使用）
-英雄名/头像/装备价格：腾讯官方数据。
-请求量很小：榜单每 6 小时刷新一次；英雄详情只在选人/进游戏时按需获取，缓存 12 小时。
-"""
+"""多数据源、地区目录和本地缓存。"""
 import json
 import os
 import re
 import threading
 import time
 
+from haidou import Haidou
 import sources as S
 import taiwan
 from webutil import http_get, parse_module  # noqa: F401  (其他模块从这里导入)
@@ -19,7 +14,7 @@ SCHEMA = 5
 CACHE_TTL = 6 * 3600
 DETAIL_TTL = 12 * 3600
 RARITY_KEYS = ("silver", "gold", "prismatic")  # augment.rarity 0/1/2
-SOURCE_NAMES = {"aramgg": "aramgg.com", "opgg": "op.gg", "douhun": "douhunwiki.cn"}
+SOURCE_NAMES = {"aramgg": "aramgg.com", "haidou": "海斗榜", "opgg": "OP.GG", "douhun": "douhunwiki.cn"}
 
 
 def norm(text):
@@ -56,22 +51,21 @@ class Data:
         self._detail = {}
         self._aug_names = None
         self._down = {}
+        self.haidou = Haidou()
         self._lock = threading.Lock()
-        self._douhun_files = None
-        self._lock_dh = threading.Lock()
         self.refreshing = set()   # 正在联网更新的英雄 id（界面据此显示“更新中…”）；"meta" 表示榜单
 
     # ------------------------------------------------------------ 基础数据
     def _is_down(self, name):
-        if name == "aramgg" and os.environ.get("ARAM_FORCE_OPGG"):  # 仅测试用：模拟 aramgg 不可用
+        if name.startswith(("aramgg", "haidou")) and os.environ.get("ARAM_FORCE_OPGG"):  # 仅测试用：模拟 aramgg 不可用
             return True
         return time.time() < self._down.get(name, 0)
 
     def _mark_down(self, name, secs=300):
         self._down[name] = time.time() + secs  # 短时间内不再反复请求已失败的源
 
-    def source_label(self):
-        return SOURCE_NAMES.get(self.meta.get("source"), "?")
+    def source_label(self, source=None):
+        return SOURCE_NAMES.get(source or self.meta.get("source"), "?")
 
     def load_cached(self):
         """只读本地缓存（不联网、不管多旧）：第二次起启动时先用它立刻显示，联网更新放到后台。"""
@@ -98,11 +92,8 @@ class Data:
             return
         self._down.clear()
         errors, meta = [], None
-        for name, fn in (("aramgg", self._meta_aramgg), ("opgg", self._meta_opgg)):
-            if name == "opgg" and cached and cached.get("source") == "aramgg" and age < 72 * 3600:
-                log("aramgg 暂时不可用，沿用 %.0f 小时前的 aramgg 缓存" % (age / 3600))
-                self.meta = cached
-                return
+        for name, fn in (("aramgg", self._meta_aramgg), ("haidou", self._meta_haidou),
+                         ("opgg", self._meta_opgg)):
             try:
                 log("正在从 %s 更新数据…" % SOURCE_NAMES[name])
                 meta = fn(cached)
@@ -116,12 +107,7 @@ class Data:
             self.meta = cached
             return
         if meta is None:
-            try:
-                log("尝试最后兜底：douhunwiki.cn（数据可能较旧）")
-                meta = self._meta_douhun(cached)
-            except Exception as e:  # noqa: BLE001
-                errors.append("douhunwiki.cn：%s" % e)
-                raise RuntimeError("无法获取数据且没有本地缓存 —— " + "；".join(errors))
+            raise RuntimeError("无法获取数据且没有本地缓存 —— " + "；".join(errors))
         self.meta = meta
         self._aug_names = None
         _write(self.meta_path, meta)
@@ -174,17 +160,12 @@ class Data:
             cat = S.douhun_meta()[1]
         return self._pack("opgg", summary, ver, upd, heroes, items, cat, opgg_keys=keys)
 
-    def _meta_douhun(self, cached):
-        summary, cat, ver, upd, files = S.douhun_meta()
-        heroes, items, local_cat = self._common(cached)
-        if self.region != "TW":
-            cat = {**cat, **(local_cat or {})}
-        if self.region == "TW":
-            if not local_cat:
-                raise RuntimeError("無法取得台服增幅裝置目錄")
-            cat = local_cat
-        self._douhun_files = files
-        return self._pack("douhun", summary, ver, upd, heroes, items, cat, douhun_files=files)
+    def _meta_haidou(self, cached):
+        summary, version, updated = self.haidou.summary()
+        heroes, items, cat = self._common(cached)
+        if not summary or not cat:
+            raise S.NoData("海斗榜英雄数据或强化目录缺失")
+        return self._pack("haidou", summary, version, updated, heroes, items, cat)
 
     # ------------------------------------------------------------ 查询
     def hero(self, cid):
@@ -225,9 +206,9 @@ class Data:
         return self._aug_names
 
     # ------------------------------------------------------------ 英雄详情（按需、带缓存、可降级）
-    def _chain(self):
+    def _chain(self, dataset):
         """详情的尝试顺序：aramgg 优先；失败过的源 5 分钟内不再重试，恢复后自动切回。"""
-        return [n for n in ("aramgg", "opgg", "douhun") if not self._is_down(n)]
+        return [n for n in ("aramgg", "haidou", "opgg") if not self._is_down(n + "_" + dataset)]
 
     def _cached_file(self, kind, hid, ttl_for):
         path = os.path.join(self.dir, "detail", "%s_%s.json" % (kind, hid))
@@ -249,31 +230,15 @@ class Data:
                 k = {}
         return k.get(hid) or (self.hero(hid) or {}).get("alias", "").lower()
 
-    def _douhun_detail_files(self):
-        if self.meta.get("douhun_files"):
-            return self.meta["douhun_files"]
-        with self._lock_dh:  # 多个英雄同时需要时只取一次
-            if self._douhun_files is None:
-                path = os.path.join(self.dir, "douhun_files.json")
-                c = _read(path)
-                if c and time.time() - c.get("t", 0) < 24 * 3600:
-                    self._douhun_files = c["files"]
-                else:
-                    self._douhun_files = S.douhun_files()
-                    _write(path, {"t": time.time(), "files": self._douhun_files})
-            return self._douhun_files
-
     def _augment_entries(self, hid, offline=False):
         ttl = lambda src: DETAIL_TTL if src == "aramgg" else 3600  # noqa: E731
         path, cached, fresh = self._cached_file("aug", hid, ttl)
         if offline:
             return cached
-        if fresh and not (cached["source"] != "aramgg" and not self._is_down("aramgg") and
+        if fresh and not (cached["source"] != "aramgg" and not self._is_down("aramgg_aug") and
                           time.time() - cached["fetched_at"] > 900):
             return cached
-        for src in self._chain():
-            if src != "aramgg" and cached and cached.get("source") == "aramgg" and                     time.time() - cached["fetched_at"] < 72 * 3600:
-                return cached  # 3 天内的 aramgg 旧数据（有胜率）优先于 op.gg 的新数据（只有综合分）
+        for src in self._chain("aug"):
             try:
                 trios = []
                 if src == "aramgg":
@@ -290,64 +255,71 @@ class Data:
                              "perf": r["perf"] if 0 < r["perf"] <= 100 and r["pickRate"] >= 0.0005 else None}
                             for r in raw]
                 else:
-                    f = self._douhun_detail_files().get(hid)
-                    raw = S.douhun_detail(f)["allAugmentsByRarity"] if f else {}
-                    ents = [{"aid": str(e["augmentId"]), "tier": e["tier"], "rank": None, "winRate": e["winRate"],
-                             "pickRate": e["pickRate"], "playCount": e["playCount"], "perf": None}
-                            for lst in raw.values() for e in lst]
+                    ents = self.haidou.augments(hid, self.meta.get("version"))
                 if not ents:
                     raise S.NoData("空数据")
                 out = {"source": src, "fetched_at": time.time(), "entries": ents, "trios": trios}
                 _write(path, out)
                 return out
-            except S.NoData:
+            except (S.NoData, LookupError):
                 continue  # 这个源没有该英雄的数据：只换下一个源，不判定源故障
             except Exception:  # noqa: BLE001
-                self._mark_down(src)
+                self._mark_down(src + "_aug")
         return cached  # 全部失败：用旧缓存（可能为 None）
 
     def _builds(self, hid, offline=False):
         path, cached, fresh = self._cached_file("build", hid, lambda s: DETAIL_TTL)
         if fresh or offline:
             return cached
-        if not self._is_down("aramgg"):
+        if not self._is_down("aramgg_build"):
             try:
                 out = {"source": "aramgg", "fetched_at": time.time(), "groups": S.aramgg_builds(hid)}
                 _write(path, out)
                 return out
             except S.NoData:
-                pass  # 该英雄样本不足，aramgg 没有出装：用旧缓存或 douhunwiki 的旧数据补上
+                pass  # 当前英雄样本不足，三件套可从 OP.GG 补齐
             except Exception:  # noqa: BLE001
-                self._mark_down("aramgg")
-        if cached and cached.get("groups"):
-            return cached
-        try:
-            f = self._douhun_detail_files().get(hid)
-            if f:
-                groups = S.douhun_detail(f).get("itemBuilds", [])
-                if groups:
-                    out = {"source": "douhun", "fetched_at": time.time(), "groups": groups}
-                    _write(path, out)
-                    return out
-        except Exception:  # noqa: BLE001
-            pass
-        return None
+                self._mark_down("aramgg_build")
+        return cached
 
-    def _item_stats(self, hid, offline=False):
-        """单件装备胜率（op.gg）。只是锦上添花：拿不到就用旧缓存，再拿不到就没有。"""
-        path, cached, fresh = self._cached_file("items", hid, lambda s: DETAIL_TTL)
-        fresh = fresh and "cores" in cached  # 旧版缓存没有三件套，重新获取
-        if fresh or offline or self._is_down("opgg"):
+    def _item_stats(self, hid, offline=False, build=None):
+        """海斗榜补全单件装备；完整三件套仍可由 OP.GG 补全。"""
+        path, cached, fresh = self._cached_file("items", hid, lambda src: DETAIL_TTL)
+        if offline or fresh and cached.get("item_schema") == 2:
             return cached
-        try:
-            out = {"source": "opgg", "fetched_at": time.time(), **S.opgg_items(self._opgg_key(hid))}
-            _write(path, out)
-            return out
-        except S.NoData:
+
+        singles = {}
+        if not self._is_down("haidou_items"):
+            try:
+                singles = self.haidou.items(hid, self.meta.get("version"))
+            except (S.NoData, LookupError):
+                pass
+            except Exception:
+                self._mark_down("haidou_items")
+
+        opgg = {}
+        known_boots = {str(row["id"]) for row in singles.get("boots", [])}
+        full_sets = {frozenset(str(i["itemId"]) for i in route["items"]
+                               if self.item(i["itemId"]) and not self.is_boots(i["itemId"])
+                               and str(i["itemId"]) not in known_boots)
+                     for group in (build or {}).get("groups", []) for route in group.get("coreBuilds", [])}
+        want_opgg = len(singles.get("items", [])) < 3 or sum(len(ids) >= 3 for ids in full_sets) < 3
+        if want_opgg and not self._is_down("opgg_items"):
+            try:
+                opgg = S.opgg_items(self._opgg_key(hid))
+            except S.NoData:
+                pass
+            except Exception:
+                self._mark_down("opgg_items")
+        if not singles.get("items") and not opgg:
             return cached
-        except Exception:  # noqa: BLE001
-            self._mark_down("opgg")
-            return cached
+        out = {"item_schema": 2, "source": "haidou" if singles.get("items") else "opgg",
+               "fetched_at": time.time(),
+               "items": singles.get("items") or opgg.get("items", []),
+               "boots": singles.get("boots") or opgg.get("boots", []),
+               "cores": opgg.get("cores") or (cached or {}).get("cores", [])}
+        _write(path, out)
+        return out
 
     def _adj_wr(self, cid, r, k=100):
         """排序用胜率：场次少的向英雄整体胜率收缩（30 场 70% 不该排在 400 场 60% 前面）；界面仍显示原始胜率。"""
@@ -387,8 +359,8 @@ class Data:
             if hit and (offline or not self.detail_stale(hid)):
                 return hit
         aug, build = self._augment_entries(hid, offline), self._builds(hid, offline)
-        items = self._item_stats(hid, offline)
-        if not aug and not build:
+        items = self._item_stats(hid, offline, build)
+        if not aug and not build and not items:
             return None
         by_rarity = {k: [] for k in RARITY_KEYS}
         for e in (aug or {}).get("entries", []):
@@ -412,9 +384,9 @@ class Data:
              "itemBuilds": (build or {}).get("groups", []),
              "itemStats": items, "trios": (aug or {}).get("trios") or [],
              "aug_source": (aug or {}).get("source"), "build_source": (build or {}).get("source"),
-             "date": time.strftime("%Y-%m-%d", time.localtime((aug or build)["fetched_at"])), "_ts": time.time()}
+             "date": time.strftime("%Y-%m-%d", time.localtime((aug or build or items)["fetched_at"])), "_ts": time.time()}
         # 这张卡片的数据是什么时候联网拿到的：取各部分里最旧的那个；超过 12 小时算“旧数据”，需要后台更新
-        d["fetched_at"] = min(p["fetched_at"] for p in (aug, build) if p)
+        d["fetched_at"] = min(p["fetched_at"] for p in (aug, build, items) if p)
         d["stale"] = time.time() - d["fetched_at"] >= DETAIL_TTL
         with self._lock:
             self._detail[hid] = d
@@ -438,7 +410,8 @@ class Data:
     def detail_stale(self, cid):
         """内存里没有这个英雄的数据，或者是超过 12 小时的旧数据。"""
         det = self._detail.get(str(cid))
-        return det is None or time.time() - det["fetched_at"] >= DETAIL_TTL
+        return (det is None or time.time() - det["fetched_at"] >= DETAIL_TTL
+                or (det.get("itemStats") is not None and det["itemStats"].get("item_schema") != 2))
 
     def _boots_ids(self, cid):
         st = (self.detail_cached(cid) or {}).get("itemStats") or {}
@@ -448,39 +421,33 @@ class Data:
         return str(iid) not in self._boots_ids(cid) and not self.is_boots(iid)
 
     def builds(self, cid, limit=3):
-        """不含鞋子的核心三件套。优先 op.gg 的三件套统计（本身不含鞋）：样本够的里面按胜率排；
-        拿不到时退回 aramgg 的核心出装并去掉其中的鞋子。"""
+        """完整的非鞋三件套，优先 aramgg，再以 OP.GG 补齐空缺。"""
         st = (self.detail_cached(cid) or {}).get("itemStats") or {}
-        cores = [c for c in st.get("cores", []) if all(self._no_boots(cid, i) and self.item(i) for i in c["ids"])]
-        for min_pick, min_games in ((0.02, 30), (0.01, 15), (0, 0)):
-            ok = [c for c in cores if c["pickRate"] >= min_pick and c["games"] >= min_games]
-            if len(ok) >= limit:
+        builds, seen = [], set()
+
+        def add(ids, stats, source):
+            ids = list(dict.fromkeys(str(i) for i in ids if self._no_boots(cid, i) and self.item(i)))[:3]
+            key = frozenset(ids)
+            if len(ids) == 3 and key not in seen:
+                seen.add(key)
+                builds.append({"items": [dict(self.item(i), itemId=i) for i in ids],
+                               **stats, "label": f"三件套 {len(builds) + 1}", "source": source})
+
+        detail = self.detail_cached(cid) or {}
+        for row in self._aramgg_builds(cid):
+            add((i["itemId"] for i in row["items"]),
+                {k: row.get(k) for k in ("winRate", "pickRate", "playCount")},
+                detail.get("build_source") or "aramgg")
+        cores = [row for row in st.get("cores", [])
+                 if len({i for i in row["ids"] if self._no_boots(cid, i) and self.item(i)}) >= 3]
+        for min_pick, min_games in ((.02, 30), (.01, 15), (0, 0)):
+            eligible = [row for row in cores if row["pickRate"] >= min_pick and row["games"] >= min_games]
+            if len(eligible) >= max(0, limit - len(builds)):
                 break
-        if ok:
-            ok.sort(key=lambda c: -self._adj_wr(cid, c))
-            seen, uniq = set(), []
-            for c in ok:  # 同样三件、只是购买顺序不同的算一套
-                key = frozenset(c["ids"][:3])
-                if key not in seen:
-                    seen.add(key)
-                    uniq.append(c)
-            ok = uniq
-            return [{"items": [{"itemId": str(i), "name": self.item(i)["name"], "icon": self.item(i).get("icon")}
-                               for i in c["ids"][:3]],
-                     "winRate": c["winRate"], "pickRate": c["pickRate"], "playCount": c["games"],
-                     "label": "三件套 %d" % (k + 1), "source": "opgg"} for k, c in enumerate(ok[:limit])]
-        out = []
-        for b in self._aramgg_builds(cid):
-            items = [dict(i, **(self.item(i["itemId"]) or {})) for i in b["items"] if self._no_boots(cid, i["itemId"])]
-            if items:
-                out.append(dict(b, items=items, label=(b.get("label") or "") + ("（已去掉鞋子）" if len(items) < len(b["items"]) else "")))
-        seen, uniq = set(), []
-        for b in out:
-            sig = tuple(str(i["itemId"]) for i in b["items"])
-            if sig not in seen:
-                seen.add(sig)
-                uniq.append(b)
-        return uniq[:limit]
+        for row in sorted(eligible, key=lambda row: -self._adj_wr(cid, row)):
+            add(row["ids"], {"winRate": row["winRate"], "pickRate": row["pickRate"],
+                             "playCount": row["games"]}, "opgg")
+        return builds[:limit]
 
     def _aramgg_builds(self, cid):
         """aramgg 的核心出装（含鞋），按选取率降序。"""

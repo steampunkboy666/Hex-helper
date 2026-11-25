@@ -3,6 +3,7 @@ data/
 # 打包产物：exe 请放到 GitHub Releases，不要提交进仓库
 build/
 dist/
+dist_region/
 *.spec
 # Python
 __pycache__/

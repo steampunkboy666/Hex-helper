@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 import advisor
 import config
+import feedback
 import gamecfg
 import itemsets
 import layout
@@ -46,6 +47,7 @@ class Bus(QObject):
     checks = Signal(list)
     detail = Signal(str)
     shopv = Signal(str, bool)
+    shop_scan = Signal(int, str, bool)
     layout = Signal(str, object, bool)
     report = Signal(object)
 
@@ -105,6 +107,7 @@ class Helper(QObject):
         self.phase, self.live, self.champ_hero, self.hero_id = "None", None, None, None
         self.cards, self.offer, self.chosen = [], None, []
         self.shop_state, self.overview_manual = False, False   # 商店面板是否应显示 / 强化速查
+        self.shop_revision, self.shop_manual = 0, False
         self.hidden_all, self.last_click, self.prev_time = False, None, 0
         self.demo_t0 = None
         self._sig = None
@@ -127,6 +130,7 @@ class Helper(QObject):
         b.cards.connect(self.on_cards)
         b.live.connect(self.on_live)
         b.shopv.connect(self.on_shop_verdict)
+        b.shop_scan.connect(self.on_shop_scan)
         b.layout.connect(self.on_layout)
         b.offer.connect(self.on_offer)
         b.status.connect(self.control.set_status)
@@ -143,6 +147,7 @@ class Helper(QObject):
         c.quit_requested.connect(self.quit)
         c.run_check.connect(self.run_selfcheck)
         c.export_diag.connect(self.export_diag)
+        c.report_bug.connect(self.open_feedback)
         c.setting_changed.connect(self.change_setting)
         self.last_checks = []
         self.loader.loaded.connect(lambda *_: None)
@@ -220,7 +225,7 @@ class Helper(QObject):
         m = self.data.meta
         self.bus.status.emit("data", "%s 版 · 更新于 %s · %d 个英雄 · 来源 %s%s · 本机获取于 %s%s" % (
             m["version"], m["updated"], m["total"], self.data.source_label(),
-            "" if m.get("source") == "aramgg" else "（备用源，部分数据缺失）", ui.age_text(m["fetched_at"]),
+            {"haidou": "（混合样本，区服未核验）", "opgg": "（备用梯队）"}.get(m.get("source"), ""), ui.age_text(m["fetched_at"]),
             "（正在后台更新…）" if "meta" in self.data.refreshing else ""),
             True if m.get("source") == "aramgg" else None)
         if getattr(self, "_started", False):
@@ -336,6 +341,8 @@ class Helper(QObject):
             self._item_set_for = None
         self.log("设置已保存：%s = %s" % (key, val))
         self._sig = None
+        if key == "offer_scale" and self._preview_visible and self.side.isVisible():
+            self.side._last()
         if key in ("preset", "aug_notes", "show_champ_select") and self.cs.isVisible():
             self.cs.render()
         self.refresh()
@@ -530,12 +537,8 @@ class Helper(QObject):
         截图时把本程序自己的面板涂黑，避免 OCR 读到面板里的强化名。游戏不在前台时什么都不做。"""
         if self.args.demo:
             return
-        scan_last, prev_thumb, cur, pend_key, pend_n, none_n = 0.0, None, None, None, 0, 0
-        burst_until, last_level, rescans, ref, ref_t = 0.0, None, [], None, 0.0
-        shop_prev, shop_due, close_due, open_frame = False, 0.0, 0.0, None
-        gone_t, n_scan, measured_game = 0.0, 0, None
-        sensor, probe_at = vision.ShopSensor(), 0.0
-        cost, slow, told = 0.0, 1.0, False       # 最近每次识别的耗时；据此自动放慢（适配低配置机器）
+        sensor, shop_watch = vision.ShopSensor(), vision.ShopWatch()
+        scene_game = None
         base_slow = 1.5 if (os.cpu_count() or 8) <= 4 else 1.0
         while not self.stop.is_set():
             if self.ocr.dead() and not self.ocr.error and self.settings["augment_ocr"] and time.time() - self.ocr.t_start > 30:
@@ -545,6 +548,7 @@ class Helper(QObject):
                                      else (self.ocr.error or "不可用"), ok)
             rect = winfx.game_rect()
             if not rect or self.live is None or not winfx.foreground_is_game():
+                shop_watch.revision = None
                 try:
                     self.vq.get(timeout=0.5)
                 except queue.Empty:
@@ -555,25 +559,30 @@ class Helper(QObject):
             except queue.Empty:
                 ev = None
             now = time.time()
+            if scene_game != self.game_no:
+                scene_game = self.game_no
+                scan_last, prev_thumb, cur, pend_key, pend_n, none_n = 0.0, None, None, None, 0, 0
+                burst_until, last_level, rescans, ref, ref_t = 0.0, None, [], None, 0.0
+                shop_prev, shop_due, close_due, open_frame = False, 0.0, 0.0, None
+                gone_t, n_scan, measured_game, last_wide_scan = 0.0, 0, None, 0.0
+                cost, slow, told = 0.0, base_slow, False
             if ev == "click" and (cur or now - gone_t < 120):
                 # 三选一期间（或刚收起/消失不久）点了鼠标：选择、刷新、收起、重新展开都是点出来的，
                 # 0.7 / 1.8 / 3.5 秒后各看一次结果（选择后卡片有一段消失动画，看一次不一定准）
                 rescans = [now + 0.7, now + 1.8, now + 3.5]
             rescan_at = rescans[0] if rescans else 0.0
-            # 用鼠标点金币/商店按钮开关商店（不按 P）：点击后 0.45 秒看一眼画面中央是不是商店底色（64x36 小图，约 17 毫秒）
-            #   打开：只认点在画面下方 HUD 金币/商店按钮附近的点击。以前任何点击后都看底色，地图暗处、阵亡灰屏、
-            #   设置菜单等偶尔也像商店底色，会在对局中途突然弹出出装面板（实机反馈）。
-            #   关闭：商店开着时任何点击后都看一眼（点右上角 ×、点空白处都会关商店），误关的代价很小。
-            if ev == "click" and not cur and now - gone_t > 3 and self.last_click:
-                if self.shop_state or self.gold_zone(rect, self.last_click):
-                    probe_at = now + 0.45
-            if probe_at and now >= probe_at:
-                probe_at = 0.0
-                sc = sensor.score(rect)
-                if not self.shop_state and sc >= sensor.OPEN:
-                    self.bus.shopv.emit("鼠标点开（底色 %.2f）" % sc, True)
-                elif self.shop_state and sc <= sensor.CLOSE:
-                    self.bus.shopv.emit("鼠标关闭（底色 %.2f）" % sc, False)
+            # 关闭需要连续两次有效截图。只有商店键或 HUD 金币点击允许重新打开。
+            revision = self.shop_revision
+            watching = self.shop_state and not self.shop_manual
+            wants_open = not self.shop_state and (ev == ("shop_key", revision) or (
+                ev == "click" and not cur and now - gone_t > 3 and self.gold_zone(rect, self.last_click)))
+            if shop_watch.ready(now, revision, watching, click=ev == "click", open_request=wants_open):
+                extent = self.settings["shop_extent"].get("%dx%d" % (rect[2], rect[3]))
+                score = sensor.score(rect, extent)
+                verdict = shop_watch.observe(now, score, watching)
+                if verdict is not None:
+                    self.bus.shop_scan.emit(revision, "画面确认%s（底色 %.2f）" % (
+                        "打开" if verdict else "关闭", score), verdict)
             # ---------------- 商店面板的位置（不同机器上商店位置/大小不同，所以从画面里量，不写死）
             #  打开后 0.5 秒：用“底色法”量一次，之后每 3 秒复查（商店被拖动也能跟上）；
             #  关闭后 0.55 秒：把“开着时的图”和“关了以后的图”对比，面板出现的位置两侧都能量准，并记到设置里下次直接用。
@@ -607,13 +616,11 @@ class Helper(QObject):
             except Exception:  # noqa: BLE001
                 self.log("测量商店位置出错：\n%s" % traceback.format_exc())
                 open_frame, close_due = None, 0.0
-            if not (self.ocr.ready and self.settings["augment_ocr"]) or self.shop_state:
+            if not (self.ocr.ready and self.settings["augment_ocr"]) or watching:
                 continue
             snap = self.live
             if snap is None:
                 continue
-            if snap.get("time", 0) < 5 and cost:
-                cost, slow, told = 0.0, base_slow, False   # 新的一局：重新评估本机识别速度
             lvl = snap.get("level")
             if last_level is not None and lvl and lvl > last_level:
                 # 实测海克斯大乱斗在 3 级（开局）、7 级……弹三选一，之后每 4 级一次：只在这些等级加密识别 25 秒，
@@ -658,14 +665,19 @@ class Helper(QObject):
                 if self.ocr.last_error and self.ocr.last_error != getattr(self, "_ocr_err", None):
                     self._ocr_err = self.ocr.last_error
                     self.log("海克斯 OCR 出错：%s" % self.ocr.last_error)
-                hits = vision.find_augments(self.data, lines, w, h)
-                if len(hits) in (2, 3):                # 短标题（如“台风”）常被漏掉：单独放大第三张的标题再认一次
-                    hits = vision.recover_missing(self.ocr, self.data, getattr(self.ocr, "last_path", None), hits, w, h)
-                for x in hits:                    # 裁剪图内的比例 → 整个画面的比例
+                found = vision.find_augments(self.data, lines, w, h)
+                if len(found) in (2, 3):
+                    found = vision.recover_missing(self.ocr, self.data, getattr(self.ocr, "last_path", None), found, w, h)
+                for x in found:                    # 裁剪图内的比例 → 整个画面的比例
                     x["cx"] = crop[0] + x["cx"] * (crop[2] - crop[0])
                     x["cy"] = crop[1] + x["cy"] * (crop[3] - crop[1])
-                if hits or not (i == 0 and now < burst_until and n_scan % 3 == 0):
-                    break                         # 升级后横带什么都没认出时，每 3 次才用整块中部兜底一次（OCR 很吃 CPU）
+                if len(found) > len(hits):
+                    hits = found
+                if i == 0:
+                    retry_wide = len(hits) == 2 or (not hits and n_scan % 3 == 0)
+                    if not retry_wide or t_scan - last_wide_scan < 4 * slow:
+                        break
+                    last_wide_scan = t_scan     # 限制大范围 OCR 的频率（横带未读到选项或只认出两项时）
             scan_last = time.time()
             # 自适应：一次识别超过 0.25 秒说明这台机器 CPU 紧张，按比例拉长识别间隔（最多 3 倍），保证不拖累游戏
             cost = (scan_last - t_scan) if not cost else 0.7 * cost + 0.3 * (scan_last - t_scan)
@@ -675,11 +687,16 @@ class Helper(QObject):
                 self.log("本机识别一次约 %.2f 秒（%d 线程 CPU），已自动降低识别频率（×%.1f）" % (cost, os.cpu_count() or 0, slow))
             rescans = [t for t in rescans if t > scan_last]
             key = tuple(x["aid"] for x in hits)
+            if key and cur and len(key) < len(cur) and set(key).issubset(cur):
+                # 同一组卡片偶尔少读几张。保留上一次完整识别，等下一帧重新确认。
+                none_n = 0
+                pend_key, pend_n = None, 0
+                continue
             if key:
                 none_n = 0
                 pend_n = pend_n + 1 if key == pend_key else 1
                 pend_key = key
-                if (pend_n >= 2 or len(hits) >= 3) and key != cur:   # 三个都认出来就不用等第二次
+                if (pend_n >= 2 or len(hits) >= max(3, len(cur or ()))) and key != cur:
                     if cur and not set(key) & set(cur):
                         # 直接换成了完全不同的一组（连续升级时选完一组马上弹下一组）：先按“上一组已选择”结算，再显示新的
                         self.bus.offer.emit(None)
@@ -703,6 +720,8 @@ class Helper(QObject):
 
     # ------------------------------------------------------------ 状态更新（主线程）
     def set_shop(self, state, why=""):
+        self.shop_revision += 1
+        self.shop_manual = state and why == "手动"
         if state != self.shop_state:
             self.shop_state = state
             self.log("商店面板：%s%s" % ("显示" if state else "收起", "（%s）" % why if why else ""))
@@ -727,6 +746,10 @@ class Helper(QObject):
     def on_shop_verdict(self, why, state):
         """其他线程（演示流程）要求设置商店面板状态。"""
         self.set_shop(state, why)
+
+    def on_shop_scan(self, revision, why, state):
+        if revision == self.shop_revision and self.live is not None and winfx.foreground_is_game():
+            self.set_shop(state, why)
 
     def on_phase(self, phase):
         if phase in ("ChampSelect", "InProgress"):
@@ -796,7 +819,8 @@ class Helper(QObject):
                     self.log("本局画面识别 %d 次，平均每次 截图 %.0f 毫秒 + 识别 %.0f 毫秒" % (
                         st["n"], 1000 * st["cap"] / st["n"], 1000 * st["ocr"] / st["n"]))
                     self.ocr.stats = {"n": 0, "cap": 0.0, "ocr": 0.0}
-                self.shop_state, self.offer = False, None
+                self.shop_revision += 1
+                self.shop_state, self.shop_manual, self.offer = False, False, None
             if was is not None or not getattr(self, "_nongame", False):
                 self.bus.status.emit("game", "未在对局中", None)
             if was is not None:
@@ -981,9 +1005,15 @@ class Helper(QObject):
             self.refresh()
         if edge & {"bigger", "smaller", "dock_left", "dock_right"}:
             if "bigger" in edge or "smaller" in edge:
-                v = round(min(1.8, max(0.6, float(self.settings["ui_scale"]) + (0.1 if "bigger" in edge else -0.1))), 2)
-                self.settings.set("ui_scale", v)
-                msg = "面板大小 %d%%" % round(v * 100)
+                offer_active = self.side.isVisible() and self.side._mode == "offer"
+                key = "offer_scale" if offer_active else "ui_scale"
+                v = round(min(1.8, max(0.6, float(self.settings[key]) + (0.1 if "bigger" in edge else -0.1))), 2)
+                self.settings.set(key, v)
+                if offer_active:
+                    self.control.offer_zoom.blockSignals(True)
+                    self.control.offer_zoom.setValue(round(v * 100))
+                    self.control.offer_zoom.blockSignals(False)
+                msg = ("强化推荐大小" if offer_active else "面板大小") + " %d%%" % round(v * 100)
             else:
                 self.settings.set("dock_side", "left" if "dock_left" in edge else "right")
                 msg = "面板放在画面%s侧" % ("左" if "dock_left" in edge else "右")
@@ -991,6 +1021,8 @@ class Helper(QObject):
             self.side._digest = None
             if self.cs.isVisible():
                 self.cs.render()
+            if self._preview_visible and self.side.isVisible():
+                self.side._last()
             self.refresh()
             self.toast.say(msg, winfx.game_rect() or winfx.screen_rect(), 1800)
         if (self.args.demo or winfx.foreground_is_game()) and self.live is not None:
@@ -998,10 +1030,10 @@ class Helper(QObject):
                 self.chatting = not self.chatting   # 回车打开/发送聊天
             if "_p" in edge and not any(k in edge for k in self.hk) and not self.chatting:
                 self.set_shop(not self.shop_state, "%s 键" % self.settings["shop_key"])
+                self.vq.put(("shop_key", self.shop_revision))
             if "_esc" in edge:
                 self.chatting = False
-                if self.shop_state:
-                    self.set_shop(False, "Esc")
+                self.set_shop(False, "Esc")
             if "_lb" in edge:
                 x, y = winfx.cursor_pos()
                 self.last_click = (x, y, time.time())
@@ -1040,6 +1072,9 @@ class Helper(QObject):
                 self.control.show()
             self.tray.showMessage("Hex Helper", "环境自检发现 %d 个问题，请查看控制台" % (bad + warn))
 
+    def open_feedback(self):
+        feedback.FeedbackDialog(self, ui.display_text).exec()
+
     def export_diag(self):
         p = selfcheck.write_diagnostic(self, self.last_checks)
         self.log("诊断文件已生成：%s" % p)
@@ -1057,6 +1092,8 @@ class Helper(QObject):
     def change_scale(self, delta):
         v = round(min(1.6, max(0.8, float(self.settings["ui_scale"]) + delta)), 2)
         self.settings.set("ui_scale", v)
+        if self._preview_visible and self.side.isVisible():
+            self.side._last()
         self._sig = None
         if self.cs.isVisible():
             self.cs.render()

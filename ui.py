@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
-                               QPlainTextEdit, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import advisor
 import report
@@ -107,8 +107,10 @@ class Ctx:
         self.data, self.loader, self.settings = data, loader, settings
         self.auto = 1.0
 
+    panel_scale = 1.0
+
     def S(self, x):
-        return max(1, round(x * float(self.settings["ui_scale"]) * self.auto))
+        return max(1, round(x * float(self.settings["ui_scale"]) * self.auto * self.panel_scale))
 
 
 def screens_info():
@@ -384,7 +386,7 @@ class HeroCard(QFrame):
             lay.addWidget(section_title(ctx, "胜率最高的 3 件装备（不含鞋子）"))
             lay.addWidget(build_row(ctx, [{"name": i["name"], "icon": i["icon"]} for i in top], "<br>".join(
                 "%.1f%% · %d场" % (i["winRate"] * 100, i["games"]) for i in top)))
-        old_src = det.get("build_source") not in (None, "aramgg")
+        old_src = det.get("build_source") == "douhun"
         lay.addWidget(section_title(ctx, "核心三件套（不含鞋子）" + ("（旧数据：douhunwiki.cn）" if old_src else "")))
         for b in d.builds(hid, 2 if compact else 3):
             items = [{"name": i["name"], "icon": i["icon"]} for i in b["items"]]
@@ -662,6 +664,7 @@ class SidePanel(QWidget):
             self.setAttribute(Qt.WA_TranslucentBackground)
         self.frame, self._pm, self._digest, self._rect, self._pos = None, None, None, None, None
         self._styled = False
+        self._offer_compact = False
         self._fit, self._last, self._refit, self._mode = 1.0, None, False, "shop"
         self.extent, self._side, self._dpr = {}, "right", 1.0   # 实测的商店/卡片左右边缘；当前停靠侧；显示缩放
         self._scr, self._lg = screens_info()[0], (0, 0, 1920, 1080)
@@ -691,6 +694,7 @@ class SidePanel(QWidget):
             self.frame.deleteLater()
         if not self._refit:
             self._fit = 1.0
+            self._offer_compact = False
         self._mode = mode
         scr, (l, t, w, h) = logical_game(rect)
         self._scr, self._lg = scr, (l, t, w, h)
@@ -702,7 +706,8 @@ class SidePanel(QWidget):
         xl = min(ext[0], 0.5 - half) if ext[0] is not None else 0.5 - half
         xr = max(ext[1], 0.5 + half) if ext[1] is not None else 0.5 + half
         free = {"left": xl * w - self.MARGIN, "right": (1 - xr) * w - self.MARGIN}
-        ui = float(self.ctx.settings["ui_scale"])
+        self.ctx.panel_scale = float(self.ctx.settings["offer_scale"]) if mode == "offer" else 1.0
+        ui = float(self.ctx.settings["ui_scale"]) * self.ctx.panel_scale
         want = auto_scale(h) * self.BIGGER
         wanted_w = self.BASE_W * ui * want
         pref = self.ctx.settings["dock_side"]
@@ -817,12 +822,13 @@ class SidePanel(QWidget):
                 left = "全部已购" if b["left"] == 0 else "还需 %d 金币" % b["left"]
                 wr, tail = build_stats({"winRate": b["winRate"], "playCount": b["play"], "pickRate": b["pick"]})
                 lay.addWidget(build_row(ctx, items, "%s<br><span style='color:%s'>%s</span><br>%s<br>%s" % (
-                    esc(b["label"]), GREEN if (b["winRate"] or 0) >= .5 else DIM, wr, tail, left), icon=44, name_w=64))
+                    esc(b["label"] + (" · " + d.source_label(b["source"]) if b.get("source") else "")),
+                    GREEN if (b["winRate"] or 0) >= .5 else DIM, wr, tail, left), icon=44, name_w=64))
         det = d.detail_cached(hid) if hid else None
-        old = det and det.get("build_source") not in (None, "aramgg")
+        item_source = (det or {}).get("itemStats") or {}
         if not lite:
             lay.addWidget(lab("绿色√ 已拥有 · 金边 当前买得起 · %s" % (
-                "出装来自 douhunwiki.cn 的旧数据（主源对该英雄无出装）" if old else "装备与三件套胜率来自 op.gg（不含鞋子）"),
+                "单件装备：%s" % d.source_label(item_source["source"]) if item_source.get("source") else "暂无单件装备统计"),
                 S(10), DIM, wrap=True))
         self._place(game_rect)
 
@@ -832,9 +838,13 @@ class SidePanel(QWidget):
         ctx, d, S = self.ctx, self.ctx.data, self.ctx.S
         lay = self._fresh(game_rect, "offer")
         hero = d.hero(hid) if hid else None
+        detail = d.detail_cached(hid) or {}
+        source = detail.get("aug_source")
+        label = d.source_label(source) if source else "暂无统计"
+        if source == "opgg":
+            label += " 梯队"
         self.header(lay, hid, "海克斯强化 · %s" % (hero["title"] if hero else "未识别英雄"),
-                    "已选 %d 个 &nbsp;|&nbsp; %s" % (len(ev["chosen"]), "评分取自该英雄的选取胜率" if d.meta.get("source") == "aramgg"
-                                                  else "评分取自 %s 梯队（无胜率）" % d.source_label()))
+                    "已选 %d 个 &nbsp;|&nbsp; 强化数据 %s" % (len(ev["chosen"]), esc(label)))
         self._n_opts = len(ev["options"])
         rank = sorted((o for o in ev["options"] if o.get("order")), key=lambda o: o["order"])
         if rank:
@@ -842,7 +852,7 @@ class SidePanel(QWidget):
                                                        for i, o in enumerate(rank)), S(12), TXT, wrap=True))
         for i, o in enumerate(ev["options"]):
             lay.addWidget(self._option(o, i + 1))
-        if ctx.settings["preset"] == "lite":         # 精简：不显示已选强化和说明文字
+        if ctx.settings["preset"] == "lite" or self._offer_compact:         # 精简：不显示已选强化和说明文字
             self._place(game_rect)
             return
         if ev["chosen"]:
@@ -872,7 +882,8 @@ class SidePanel(QWidget):
         col.setSpacing(S(1))
         tcol = TIER_COL.get(o["tier"], DIM)
         rank = "第%d/%d" % (o["rank"], o["total"]) if o["rank"] else ""
-        pos = {1: "左", 2: "中", 3: "右"}.get(idx, str(idx)) if self._n_opts == 3 else "从左第%d张" % idx
+        pos = {1: "左", 2: "中", 3: "右"}[idx] if self._n_opts == 3 else (
+            "从左第%d张" % idx if self._n_opts == 4 else "已识别")
         order = o.get("order")
         col.addWidget(lab("<span style='color:%s'>%s</span> &nbsp;<b>%s</b> &nbsp;<span style='color:%s;font-size:%dpx'>%s</span>%s" % (
             DIM, pos, esc(o["name"]), RARITY_COL[o["rarity"]], S(10), o["rname"],
@@ -887,7 +898,7 @@ class SidePanel(QWidget):
             stat = "梯队 <b style='color:%s'>%s</b> &nbsp; %s%s &nbsp;<span style='color:%s'>(op.gg 无胜率)</span>" % (
                 tcol, tier_text(o["tier"]), rank, " &nbsp; 综合分 %.0f" % o["perf"] if o["perf"] else "", DIM)
         col.addWidget(lab(stat, S(12), TXT))
-        lite = ctx.settings["preset"] == "lite"
+        lite = ctx.settings["preset"] == "lite" or self._offer_compact
         if lite:   # 精简：名称、胜率、综合分、套路一行、冲突提示
             note = o.get("note") if ctx.settings["aug_notes"] else None
             line = "综合 <b>%.1f</b>" % (o["final"] * 100) if o.get("final") is not None else ""
@@ -965,6 +976,14 @@ class SidePanel(QWidget):
         fr.layout().activate()
         h = fr.layout().sizeHint().height()
         room = (float(self.ctx.settings["panel_bottom"]) - float(self.ctx.settings["panel_top"])) * self._lg[3]
+        if h > room and self._mode == "offer" and self.ctx.panel_scale > 1 and not self._offer_compact:
+            self._offer_compact = True
+            self._refit = True
+            try:
+                self._last()
+            finally:
+                self._refit = False
+            return
         if h > room and self._fit > 0.55 and self._last:  # 内容比可用高度高：按比例缩小后重排一次
             self._fit *= max(0.55, room / h)
             self._refit = True
@@ -1124,6 +1143,7 @@ class ControlWindow(QWidget):
     refresh_data = Signal()
     run_check = Signal()
     export_diag = Signal()
+    report_bug = Signal()
     quit_requested = Signal()
     setting_changed = Signal(str, object)
 
@@ -1200,7 +1220,8 @@ class ControlWindow(QWidget):
         lay.addLayout(self.check_box)
         self.check_box.addWidget(lab("正在自检…", 12, DIM))
         cb = QHBoxLayout()
-        for text, sig in (("重新自检", self.run_check), ("导出诊断文件", self.export_diag)):
+        for text, sig in (("重新自检", self.run_check), ("导出诊断文件", self.export_diag),
+                          ("反馈问题", self.report_bug)):
             b = QPushButton(display_text(text))
             b.clicked.connect(sig.emit)
             cb.addWidget(b)
@@ -1234,6 +1255,18 @@ class ControlWindow(QWidget):
         row.addWidget(combo)
         row.addStretch()
         lay.addLayout(row)
+        zoom = QHBoxLayout()
+        zoom.addWidget(lab("强化推荐面板大小", 13, DIM))
+        self.offer_zoom = QSpinBox()
+        self.offer_zoom.setRange(60, 180)
+        self.offer_zoom.setSingleStep(10)
+        self.offer_zoom.setSuffix("%")
+        self.offer_zoom.setValue(round(settings["offer_scale"] * 100))
+        self.offer_zoom.setToolTip(display_text("空间不足时优先显示选项、排名和综合分"))
+        self.offer_zoom.valueChanged.connect(lambda value: self.setting_changed.emit("offer_scale", value / 100))
+        zoom.addWidget(self.offer_zoom)
+        zoom.addStretch()
+        lay.addLayout(zoom)
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(2)

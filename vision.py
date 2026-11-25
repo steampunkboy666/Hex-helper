@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from ctypes import wintypes as wt
+from itertools import combinations
 
 import numpy as np
 
@@ -118,10 +119,19 @@ class ShopSensor:
         r = rect[3] / max(1, rect[2])
         return (max(0.02, 0.5 - 0.427 * r), 0.16, min(0.98, 0.5 + 0.355 * r), 0.68)
 
-    def score(self, rect):
-        """面板中央“商店底色”格子的占比（0~1）。"""
-        a = grab(rect, self.GW, self.GH).astype(np.float32)
-        return self.score_array(a[:, :, 2], a[:, :, 1], a[:, :, 0], self.regions(rect))
+    def score(self, rect, extent=None):
+        """采样商店内侧的小块画面。黑屏或截图失败时没有有效分数。"""
+        x0, y0, x1, y1 = self.regions(rect)
+        if extent and None not in extent[:2]:
+            left, right = extent[:2]
+            if 0.18 <= right - left <= 0.92:
+                pad = (right - left) * 0.14
+                x0, x1 = left + pad, right - pad
+        a = grab(crop_rect(rect, (x0, y0, x1, y1)), self.GW, self.GH)[:, :, :3]
+        if not a.any():
+            return None
+        r, g, b = a[:, :, ::-1].astype(np.float32).transpose(2, 0, 1)
+        return self.score_array(r, g, b, (0, 0, 1, 1))
 
     def score_array(self, r, g, b, box):
         ys = slice(int(box[1] * r.shape[0]), int(box[3] * r.shape[0]))
@@ -131,6 +141,32 @@ class ShopSensor:
         like = (lum > 8) & (lum < 70) & (b < 0.75 * r + 6) & (g <= r + 8)
         self.last = float(like.mean())
         return self.last
+
+
+class ShopWatch:
+    """按键或点击后复查。推荐显示时才低频巡检，两帧都关才自动收起。"""
+    def __init__(self):
+        self.revision = None
+        self.due = 0.0
+        self.low = 0
+
+    def ready(self, now, revision, watching, *, click=False, open_request=False):
+        if self.revision != revision:
+            self.revision, self.low = revision, 0
+            self.due = now + 0.45 if watching else 0.0
+        if watching and click:
+            self.due = min(self.due, now + 0.45)
+        elif not watching and open_request:
+            self.due = now + 0.45
+        return bool(self.due and now >= self.due)
+
+    def observe(self, now, score, watching):
+        if not watching:
+            self.due = 0.0
+            return True if score is not None and score >= ShopSensor.OPEN else None
+        self.low = self.low + 1 if score is not None and score <= ShopSensor.CLOSE else 0
+        self.due = now + (0.45 if self.low else 2.0)
+        return False if self.low >= 2 else None
 
 
 # ---------------------------------------------------------------- 系统 OCR（Windows.Media.Ocr，经常驻 PowerShell 调用）
@@ -334,6 +370,8 @@ def _close_name(data, text):
     只在已知“这里有一张卡片”时使用：文字里含完整名称直接采用；否则找同长度、仅错一个字、且唯一的名称。"""
     names = data.augment_names()
     t = norm(text)
+    if t in names:
+        return names[t]
     for nm in sorted(names, key=len, reverse=True):
         if len(nm) >= 2 and nm in t:
             return names[nm]
@@ -348,55 +386,67 @@ def _close_name(data, text):
     return best[0] if len(best) == 1 else None
 
 
+def missing_title_centers(hits):
+    """用居中的等距卡片拟合缺失标题位置，比较相对间距以适配宽高比。"""
+    xs = sorted(h["cx"] for h in hits)
+    if len(xs) not in (2, 3):
+        return []
+    candidates = []
+    for count in range(max(3, len(xs)), 5):
+        offsets = tuple(i - (count - 1) / 2 for i in range(count))
+        for used in combinations(range(count), len(xs)):
+            present = [offsets[i] for i in used]
+            step = sum((x - 0.5) * v for x, v in zip(xs, present)) / sum(v*v for v in present)
+            if step < 0.08 or offsets[-1] * step >= 0.47:
+                continue
+            error = max(abs(x - 0.5 - step*v) for x, v in zip(xs, present)) / step
+            if error < 0.19:
+                if count == len(xs):
+                    return []
+                missing = [0.5 + step*v for i, v in enumerate(offsets) if i not in used]
+                candidates.append((round(error, 3), count, missing))
+    return min(candidates)[2] if candidates else []
+
+
 def recover_missing(ocr, data, path, hits, W, H):
-    """三张卡片只认出两张时，按卡片等间距推算第三张的位置，把它的标题单独放大、二值化后再识别一次。"""
+    """放大可能漏读的官方名称，保留已识别卡片。"""
     if len(hits) not in (2, 3) or not path:
         return hits
     from PIL import Image, ImageOps
-    xs = sorted(h["cx"] for h in hits)
-    if len(xs) == 2:
-        d = xs[1] - xs[0]
-        cands = [(xs[0] + xs[1]) / 2] if d > 0.3 else [xs[0] - d, xs[1] + d]
-        cx = min(cands, key=lambda c: abs((sum(xs) + c) / 3 - 0.5))
-    else:
-        # 四张等距卡片以画面中线为中心。拟合三个已读中心，
-        # 常规对称的三张不会满足四列几何条件，也不会额外启动 OCR。
-        offsets = (-1.5, -0.5, 0.5, 1.5)
-        candidates = []
-        for missing in range(4):
-            present = [v for i, v in enumerate(offsets) if i != missing]
-            step = sum((x - 0.5) * v for x, v in zip(xs, present)) / sum(v*v for v in present)
-            error = max(abs(x - 0.5 - step*v) for x, v in zip(xs, present))
-            if step > 0.08 and error < 0.13 * step:
-                candidates.append((error, 0.5 + offsets[missing] * step))
-        if not candidates:
-            return hits
-        cx = min(candidates)[1]
-    if not 0.03 < cx < 0.97:
+    centers = missing_title_centers(hits)
+    if not centers:
         return hits
     known = {h["aid"] for h in hits}
     cy = sum(h["cy"] for h in hits) / len(hits)
-    aid = None
+    full = list(hits)
     try:
-        g = ImageOps.grayscale(Image.open(path))
+        with Image.open(path) as image:
+            g = ImageOps.grayscale(image)
         p = os.path.join(os.path.dirname(path), "title.png")
-        # 单次识别不稳定：换几种裁剪大小/阈值/放大倍数，哪次认出来就用哪次（每次约 0.03 秒）
-        for hw, hh, thr, sc in ((0.05, 0.07, 120, 2), (0.05, 0.07, 150, 2), (0.11, 0.05, 150, 2), (0.07, 0.07, 120, 2),
-                                (0.05, 0.05, 150, 3), (0.11, 0.07, 120, 3)):
-            box = (int((cx - hw) * W), int((cy - hh) * H), int((cx + hw) * W), int((cy + hh) * H))
-            t = g.crop(box).point(lambda v, thr=thr: 0 if v > thr else 255)  # 亮字 → 白底黑字
-            t = t.resize((t.width * sc, t.height * sc), Image.LANCZOS)
-            page = Image.new("L", (t.width + 200, t.height + 120), 255)
-            page.paste(t, (100, 60))
-            page.save(p)
-            aid = _close_name(data, "".join(w[0] for ln in ocr.recognize(p) for w in ln))
-            if aid and aid not in known:
-                break
+        variants = ((0.05, 0.07, 120, 2), (0.05, 0.07, 150, 2), (0.11, 0.05, 150, 2),
+                    (0.07, 0.07, 120, 2), (0.05, 0.05, 150, 3), (0.11, 0.07, 120, 3))
+        positions = centers + [h["cx"] for h in hits]
+        for cx in centers:
+            separation = min(abs(cx - x) for x in positions if x != cx)
+            for hw, hh, thr, sc in variants[:6 // len(centers)]:
+                hw = min(hw, separation * 0.47)
+                box = (int((cx - hw) * W), int((cy - hh) * H), int((cx + hw) * W), int((cy + hh) * H))
+                t = g.crop(box).point(lambda v, thr=thr: 0 if v > thr else 255)
+                t = t.resize((t.width * sc, t.height * sc), Image.LANCZOS)
+                page = Image.new("L", (t.width + 200, t.height + 120), 255)
+                page.paste(t, (100, 60))
+                page.save(p)
+                text = "".join(w[0] for ln in ocr.recognize(p) for w in ln)
+                aid = _close_name(data, text)
+                if not aid and getattr(data, "region", None) == "TW" and norm(text) == "法師":
+                    aid = "tw-mage"
+                if aid and aid not in known:
+                    full.append({"aid": aid, "cx": cx, "cy": cy})
+                    known.add(aid)
+                    break
     except OSError:
         return hits
-    if aid and aid not in known:
-        return sorted(hits + [{"aid": aid, "cx": cx, "cy": cy}], key=lambda h: h["cx"])
-    return hits
+    return fix_taiwan_mage(data, sorted(full, key=lambda h: h["cx"]))
 
 
 def find_augments(data, ocr_lines, W, H):
@@ -439,6 +489,8 @@ def find_augments(data, ocr_lines, W, H):
                             for k in range(pos, pos + len(nm)):
                                 used[k] = True
                         break
+        if not found and getattr(data, "region", None) == "TW" and line == "法師":
+            found = [(0, 2, "tw-mage")]
         for pos, ln, aid in found:
             ws = [words[owner[k]] for k in range(pos, min(pos + ln, len(owner)))]
             x0, y0 = min(w[1] for w in ws), min(w[2] for w in ws)
@@ -454,4 +506,23 @@ def find_augments(data, ocr_lines, W, H):
         sep = [c for i, c in enumerate(cand) if i == 0 or c["cx"] - cand[i - 1]["cx"] > 0.08]
         if len(sep) > len(best):
             best = sep
-    return best if 2 <= len(best) <= 4 else []
+    if not 2 <= len(best) <= 4:
+        return []
+    fixed = fix_taiwan_mage(data, best)
+    return fixed if len(fixed) >= 2 else []
+
+
+def fix_taiwan_mage(data, hits):
+    """台服 2018「純粹 - 法師」的短标题容易被 OCR 读成 2087「大法師」。
+    只在同一行另外至少两张都是白银时纠正，保留正常棱彩轮次。
+    """
+    if getattr(data, "region", None) != "TW":
+        return hits
+    silver = data.augment("2018") or {}
+    if silver.get("rarity") != 0 or "2018" in {h["aid"] for h in hits}:
+        return [h for h in hits if h["aid"] != "tw-mage"]
+    ambiguous = {"2087", "tw-mage"}
+    peers = [data.augment(h["aid"]) or {} for h in hits if h["aid"] not in ambiguous]
+    confirmed = len(peers) >= 2 and all(p.get("rarity") == 0 for p in peers)
+    return [dict(h, aid="2018") if confirmed and h["aid"] in ambiguous else h
+            for h in hits if h["aid"] != "tw-mage" or confirmed]

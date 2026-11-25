@@ -118,7 +118,8 @@ def check_all(helper):
     hosts = [("主数据源 aramgg.com", "https://aramgg.com/data/champions-stats.json", "main"),
              ("强化详情/图标 cdn.dtodo.cn", "https://cdn.dtodo.cn/hextech/champion-details/875.json", "cdn"),
              ("英雄/装备 game.gtimg.cn", "https://game.gtimg.cn/images/lol/act/img/js/heroList/hero_list.js", "base"),
-             ("备用数据源 op.gg", "https://op.gg/lol/modes/aram-mayhem", "backup")]
+             ("备用数据源 海斗榜", "https://haidoubang.com/snapshots/current.json?schema=2", "haidou"),
+             ("最后备用数据源 op.gg", "https://op.gg/lol/modes/aram-mayhem", "backup")]
     if helper.settings["region"] == "TW":
         hosts[2] = ("英雄 Data Dragon", "https://ddragon.leagueoflegends.com/api/versions.json", "base")
         hosts.append(("台服裝備 CommunityDragon", "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/zh_tw/v1/items.json", "items"))
@@ -134,8 +135,8 @@ def check_all(helper):
             out.append(_item("网络 · " + n, OK, "可访问（%s）" % info))
             continue
         if kind == "main":
-            lvl = WARN if (has_cache or ok_of["backup"]) else FAIL
-            tip = "会自动改用备用数据源 op.gg 或本地缓存，但备用数据没有胜率" if lvl == WARN else "首次启动必须能访问其中一个数据源"
+            lvl = WARN if (has_cache or ok_of["haidou"] or ok_of["backup"]) else FAIL
+            tip = "按海斗榜、OP.GG 顺序尝试可用统计，全部失败时沿用缓存" if lvl == WARN else "首次启动必须能访问其中一个数据源"
         elif kind == "base":
             lvl = WARN if has_cache else FAIL
             tip = "英雄名、头像、装备价格依赖它；有本地缓存时仍可使用"
@@ -144,7 +145,7 @@ def check_all(helper):
         else:
             lvl, tip = INFO, "仅作备用，不影响正常使用"
         out.append(_item("网络 · " + n, lvl, "无法访问：" + info,
-                         tip + "；若使用代理/加速器，请对相关域名放行"))
+                         tip))
     # 数据
     m = helper.data.meta
     if not m:
@@ -159,7 +160,7 @@ def check_all(helper):
         src = helper.data.source_label()
         if m.get("source") != "aramgg":
             out.append(_item("推荐数据", WARN, "%s 版 · 当前使用备用源 %s · %.0f 小时前拉取" % (m.get("version"), src, age),
-                             "主数据源不可用时只有梯队和综合分、没有胜率；恢复后点“更新数据”切回 aramgg.com"))
+                             "可点“更新数据”重试主数据源；海斗榜为区服未核验的混合样本，OP.GG 强化提供梯队"))
         elif days > 10:
             out.append(_item("推荐数据", WARN, "%s 版 · 数据日期 %s · 来源 %s" % (m.get("version"), upd, src),
                              "数据已超过 %d 天没更新，推荐可能过时" % days))

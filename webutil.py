@@ -9,10 +9,10 @@ import urllib.error
 import urllib.request
 
 # 如实标明是哪个程序、去哪里找到作者（已实测 aramgg/op.gg/腾讯/图标站都不拦这种标识）
-VERSION = "1.4.0-beta.1"
+VERSION = "1.4.0"
 REPO = "steampunkboy666/Hex-helper"
 UA = "HexHelper/%s (+https://github.com/%s)" % (VERSION, REPO)
-MIN_GAP = {"aramgg.com": 0.4, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取
+MIN_GAP = {"aramgg.com": 0.4, "haidoubang.com": 0.5, "op.gg": 1.0, "www.douhunwiki.cn": 0.2}  # 同一主机两次请求的最小间隔（秒），避免高频抓取
 _last, _lock = {}, threading.Lock()
 _ctx = None   # 系统证书库缺根证书（精简版/网吧系统常见）时改用随程序带的证书，仍然校验，不是跳过
 

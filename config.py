@@ -28,7 +28,9 @@ LOG_PATH = os.path.join(DATA_DIR, "helper.log")
 
 DEFAULTS = {
     "region": "CN",
+    "feedback_url": "https://hex-helper-feedback.aram-helper.workers.dev/v1/feedback",
     "dock_side": "right",        # 对局内面板停靠在游戏画面的 left / right
+    "offer_scale": 1.0,          # 强化推荐面板的独立缩放
     "ui_scale": 1.0,             # 面板缩放
     "panel_opacity": 0.93,
     "overlay_safe": True,        # 防闪烁模式：面板不透明、不用“截屏排除”、三选一期间几乎不读屏幕

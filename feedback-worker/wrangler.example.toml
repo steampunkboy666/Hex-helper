@@ -1,0 +1,17 @@
+name = "hex-helper-feedback"
+main = "worker.mjs"
+compatibility_date = "2026-11-24"
+workers_dev = true
+
+# Create this private namespace in your Cloudflare account and fill in its ID.
+[[kv_namespaces]]
+binding = "FEEDBACK"
+id = "REPLACE_WITH_NAMESPACE_ID"
+
+[[ratelimits]]
+name = "UPLOAD_LIMIT"
+namespace_id = "62193"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60

@@ -54,7 +54,7 @@ def official_items():
 
 # ---------------------------------------------------------------- aramgg.com
 def aramgg_summary():
-    rows = json.loads(http_get(A_BASE + "/data/champions-stats.json"))
+    rows = json.loads(http_get(A_BASE + "/data/champions-stats.json", timeout=8, retries=1))
     rows = [r for r in rows if r.get("winRate") is not None]
     rows.sort(key=lambda r: (int(r["tier"]), -r["winRate"], -(r.get("pickRate") or 0)))
     summary = {str(r["championId"]): {"rank": i + 1, "tier": str(r["tier"]), "winRate": r["winRate"],
@@ -66,7 +66,7 @@ def aramgg_summary():
 
 
 def aramgg_catalog(locale="zh_cn"):
-    j = json.loads(http_get(A_BASE + "/data/aram-mayhem-augments.%s.json" % locale))
+    j = json.loads(http_get(A_BASE + "/data/aram-mayhem-augments.%s.json" % locale, timeout=8, retries=0))
     out = {}
     for k, v in j.items():
         if not isinstance(v, dict) or not v.get("displayName"):
@@ -105,7 +105,7 @@ def game_augment_catalog(region):
 
 def aramgg_champion(hid):
     """aramgg 的英雄详情数据文件（强化统计 + 强化三件组合），解析后的 dict。"""
-    j = json.loads(_get_hero("%s/champion-details/%s.json" % (A_CDN, hid)))
+    j = json.loads(_get_hero("%s/champion-details/%s.json" % (A_CDN, hid), timeout=8, retries=0))
     ent = next((e for e in j.get("championAugments", []) if e and str(e[0]) == str(hid)), None)
     if not ent:
         raise NoData("英雄强化数据缺失")
@@ -137,7 +137,7 @@ def aramgg_augments(hid, champ=None):
 
 def aramgg_builds(hid):
     """英雄页 HTML 里的“装备配置”：按流派(标签)分组的核心三件套。"""
-    html = _get_hero("%s/zh-CN/champion-stats/%s" % (A_BASE, hid))
+    html = _get_hero("%s/zh-CN/champion-stats/%s" % (A_BASE, hid), timeout=8, retries=0)
     if "data-champion-augments" not in html:
         raise ValueError("英雄页结构变化（找不到强化表）")  # 页面本身不对 → 视为数据源异常
     start = html.find("data-build-tabs")

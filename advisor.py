@@ -332,6 +332,6 @@ def shop_model(data, hid, owned, gold, n_builds=3):
     out = []
     for b in data.builds(hid, n_builds):
         items, total_left = _item_states(data, b["items"], owned, gold)
-        out.append({"label": b.get("label", ""), "winRate": b.get("winRate", 0), "play": b.get("playCount"),
+        out.append({"label": b.get("label", ""), "source": b.get("source"), "winRate": b.get("winRate", 0), "play": b.get("playCount"),
                     "pick": b.get("pickRate"), "items": items, "left": total_left})
     return out
