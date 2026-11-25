@@ -60,7 +60,7 @@ Windows 桌面助手，适用于英雄联盟海克斯大乱斗（ARAM Mayhem）�
 <details>
 <summary><strong>诊断、源码运行与打包</strong></summary>
 
-控制台可「重新自检」「导出诊断文件」或「反馈问题」。反馈向导依次收集截图、复现描述和可预览的诊断摘要。确认后可一键提交并获得反馈编号。反馈包存入维护者的私有存储，保留 30 天。网络失败时可另存 ZIP。[提交问题](https://github.com/steampunkboy666/Hex-helper/issues/new/choose) · [维护者部署说明](feedback-worker/README.md)
+控制台可「重新自检」「导出诊断文件」或「反馈问题」。反馈向导依次收集截图、复现描述和可预览的诊断摘要。确认后可一键提交并获得反馈编号。反馈包存入我的私有存储，保留 30 天。网络失败时可另存 ZIP。[提交问题](https://github.com/steampunkboy666/Hex-helper/issues/new/choose) · [维护者部署说明](feedback-worker/README.md)
 
 在 Windows 项目目录中运行：
 
